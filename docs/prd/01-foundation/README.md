@@ -2,8 +2,8 @@
 
 | | |
 |---|---|
-| 版本 | v0.1 |
-| 日期 | 2026-07-17 |
+| 版本 | v0.2 |
+| 日期 | 2026-07-18 |
 | 上游 | [docs/PRD.md](../../PRD.md) §8, §5.5, §5.6, §10 P0 |
 | 状态 | Draft → Gate 1 评审 |
 
@@ -72,4 +72,5 @@
 
 ## Changelog
 
+- v0.2（2026-07-18）：FND-01 回写（Feedback-obligation #1）——修正**本地**工具链 provisioning。参考开发环境（Node `22.11.0` / Corepack `0.29.4`）上，计划中的 `corepack enable && pnpm install` 会以 `Error: Cannot find matching keyid` 失败：Corepack 内置的 npm registry 签名密钥早于 registry 的密钥轮换，无法验证 pinned 的 `pnpm@10.34.5`。本地正确做法二选一：(a) 使用更新的 Node/Corepack（其内置密钥含轮换后的密钥集），或 (b) 旁路 Corepack 直接装 standalone pnpm——`npm install -g pnpm@10.34.5`，或一次性设 `COREPACK_INTEGRITY_KEYS=0`。**CI 不受影响**：`.github/workflows/ci.yml` 用 `pnpm/action-setup@v4` provision pnpm，它直接下发 pnpm 二进制、从不经 Corepack，故 scaffold（`package.json` pin、lockfile、`ci.yml`）本身正确、无需改动，只欠这条文档回写。回归测试见 `tests/toolchain.test.ts`；对应改动记于 FND-01 票据 Changelog v0.2。
 - v0.1（2026-07-17）：初稿，随 `/breakdown-prd` 生成。
