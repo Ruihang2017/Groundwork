@@ -6,6 +6,7 @@ lane: 01-foundation
 size: M
 agent: builder
 status: draft
+version: 0.1
 date: 2026-07-17
 blocked_by: [FND-02, FND-04]
 blocks: [FND-06, FND-08, FND-10, EVL-02, LIB-02, FIT-01, TLR-01, PRP-04, PLT-01, PLT-02, PLT-04]
@@ -84,3 +85,10 @@ PRD §8.1: "简历解析**原始文件解析后即弃、不落盘**——只存 
 1. General rule: if a jsonb column's shape needs to diverge from its Zod counterpart (e.g. Postgres enum limitations forcing a `text` column instead of a true pg enum for `status`), update this ticket (version +0.1, changelog line in `01-foundation/README.md`) documenting the divergence and why, before other modules write queries against it.
 2. Real Neon provisioning (`DATABASE_URL` for a live database) requires Horace's Neon account — carried forward as open question in `01-foundation/README.md` (see FND-01's equivalent note for Vercel). Until provisioned, all of this ticket's own tests and every downstream module's integration tests must run against a local/in-memory Postgres-compatible substitute, not a live Neon instance — flag this explicitly if any downstream ticket's Test plan assumes a live `DATABASE_URL` without checking for one first.
 3. If the soft-delete convention (`libraries.deletedAt`) is found to need to extend to other tables once `07-platform-launch`/PLT-01 implements hard account-delete, that ticket must NOT reinterpret "soft delete" as covering `jobs`/`tailored_resumes`/`briefs` — those tables have no `deletedAt` column by this ticket's design (only `libraries` does, per Background); PLT-01's hard delete cascades by `DELETE ... WHERE userId = ?` / join-through-`jobs`, not by toggling a soft-delete flag. If that's wrong, it's a schema decision reversal — escalate, don't silently add columns.
+
+## Changelog
+
+- v0.1 (2026-07-18, FND-05 Builder writeback): initial implementation. Notable build-time decisions and deviations, recorded here + in `01-foundation/README.md` v0.4:
+  - **Timestamp columns are `bigint` epoch-ms, not native Postgres `timestamp`** (except `users.emailVerified`, which follows the Auth.js adapter's `Date` contract). This mirrors every FND-02/FND-04 Zod schema's `z.number()` timestamp fields 1:1 with zero conversion layer — a now-decided, repo-wide convention every downstream Drizzle table (FND-08, PLT-04) and query helper inherits. No jsonb column diverged from its Zod counterpart, so Feedback obligation #1 was not triggered.
+  - **Test-plan item 3 substrate: PGlite, not pg-mem.** The ticket named `pg-mem` as the candidate in-memory substitute; it proved fundamentally incompatible with `drizzle-orm`'s node-postgres driver (rejects drizzle's `getTypeParser` and `rowMode: 'array'`). Substituted `@electric-sql/pglite` (a real Postgres compiled to WASM) with the first-class `drizzle-orm/pglite` driver + migrator — a strictly stronger substrate (runs the committed migration through the same migrator code path production uses, and round-trips real rows through the typed query builder). Test-plan item 4's fallback (drop the round-trip, static SQL only) was therefore NOT taken; full round-trip coverage ships. **Downstream (FND-06, FND-10): reuse `@electric-sql/pglite` + `drizzle-orm/pglite`, not pg-mem, as the local Postgres substitute** — see `01-foundation/README.md` v0.4.
+  - **`vitest.config.ts` `test.include` widened** to add `'db/**/*.test.ts'` (same precedented writeback FND-02 made for `lib/**`) so this ticket's tests are actually discovered; without it `pnpm test` would false-green.
