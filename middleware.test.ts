@@ -54,6 +54,15 @@ describe('middleware — matcher config (acceptance item 3)', () => {
     expect(re.test('/library')).toBe(true);
   });
 
+  it('MATCHES (protects) page routes whose first segment merely STARTS WITH "api" — the exclusion is segment-scoped via "api/", not prefix-scoped (finding #3)', () => {
+    // With a bare `api` lookahead these would be silently excluded from the auth
+    // middleware and served unauthenticated; `api/` scopes the exclusion to the
+    // real /api/ segment only, so these page routes stay protected.
+    expect(re.test('/api-docs')).toBe(true);
+    expect(re.test('/apiary')).toBe(true);
+    expect(re.test('/apis')).toBe(true);
+  });
+
   it('does not special-case literal route-group segments (they never appear in a real URL)', () => {
     expect(matcher).not.toContain('(app)');
     expect(matcher).not.toContain('(auth)');

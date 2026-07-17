@@ -1,10 +1,17 @@
-import { DrizzleAdapter } from '@auth/drizzle-adapter';
 import type { NextAuthConfig } from 'next-auth';
 import Google from 'next-auth/providers/google';
 import Resend from 'next-auth/providers/resend';
 
-import { db } from '@/db/index';
-import { accounts, sessions, users, verificationTokens } from '@/db/schema';
+// IMPORTANT (FND-08 Reviewer bounce fix, finding #1 — clean-checkout `pnpm build`
+// blocker): this config is deliberately DB-FREE. The Drizzle adapter (and its
+// `@/db/index` import) lives in auth.ts's lazy `NextAuth(async () => …)` factory,
+// NOT here. `@/db/index` throws at import time when DATABASE_URL is unset (an
+// intentional, tested FND-05 fail-fast — see db/index.test.ts), and `next build`
+// imports this whole config chain during "Collecting page data". A static `db`
+// import anywhere in the statically-loaded config therefore breaks `pnpm build`
+// on any checkout without DATABASE_URL (including CI, which sets none). Keeping db
+// out of the static graph and behind the request-time factory keeps the build
+// DB-free while preserving FND-05's runtime fail-fast. See auth.ts + plan §4.
 
 // PLT-04 (07-platform-launch) wraps or replaces this function to add invite-code
 // gating (PRD §9) — kept as a named, exported function (not inlined into the
@@ -27,26 +34,31 @@ const authConfig = {
       from: process.env.RESEND_FROM_EMAIL,
     }),
   ],
-  adapter: DrizzleAdapter(db, {
-    usersTable: users,
-    accountsTable: accounts,
-    sessionsTable: sessions,
-    verificationTokensTable: verificationTokens,
-  }),
   session: { strategy: 'database' },
   callbacks: {
     signIn: signInCallback,
-    // REQUIRED for database-strategy sessions: Session.user has no `id` field by
-    // default. Without this callback, requireUserId() (lib/auth/session.ts) would
-    // always throw UnauthorizedError in real (non-mocked) usage even for a
-    // genuinely signed-in user, because session.user.id would be undefined. The
-    // `user` arg here is the full AdapterUser row the adapter fetched from the DB
-    // (only available under the database session strategy). See FND-08 plan §0.
+    // Under `session: { strategy: 'database' }`, @auth/core calls this with
+    // `session = { ...AdapterSession, user }` and returns whatever this callback
+    // yields VERBATIM as the GET /api/auth/session response body (see
+    // @auth/core/lib/actions/session.js). The spread AdapterSession carries
+    // `sessionToken` — the EXACT value of the httpOnly session cookie — plus a
+    // top-level `userId`. Returning `session` as-is would therefore expose the
+    // session token (a durable bearer credential) in JSON to any same-origin
+    // script, defeating the cookie's httpOnly protection (FND-08 Reviewer finding
+    // #2). Return ONLY the presentation-safe subset, adding `user.id` (required by
+    // requireUserId() for query scoping — the AdapterUser row is the authoritative
+    // id source, only available under the database strategy). Never spread
+    // `session`. Mirrors @auth/core's own default JWT-strategy filter.
     session({ session, user }) {
-      if (session.user) {
-        session.user.id = user.id;
-      }
-      return session;
+      return {
+        user: {
+          id: user.id,
+          name: session.user.name,
+          email: session.user.email,
+          image: session.user.image,
+        },
+        expires: session.expires.toISOString(),
+      };
     },
   },
 } satisfies NextAuthConfig;

@@ -33,9 +33,16 @@ export const config = {
   // Excludes /api/** entirely (every API route enforces its own auth via
   // requireUserId() — see lib/auth/session.ts — and /api/auth/** specifically MUST
   // stay reachable unauthenticated or the OAuth/magic-link flow itself breaks) and
-  // Next.js's own static/image/favicon internals. Mirrors Auth.js's own official
-  // example matcher.
-  matcher: ['/((?!api|_next/static|_next/image|favicon.ico).*)'],
+  // Next.js's own static/image/favicon internals.
+  //
+  // `api/` (with the trailing slash), NOT bare `api`: the negative lookahead is a
+  // PREFIX test, so a bare `api` would also exclude any future page route whose
+  // first segment merely STARTS WITH "api" (e.g. /api-docs, /apiary) — silently
+  // serving it unauthenticated with no error (FND-08 Reviewer finding #3). The
+  // trailing slash scopes the exclusion to the real `/api/` segment only, so
+  // `/api-docs` etc. stay protected. `/api/**` (the auth endpoints) still match
+  // `api/` and remain excluded.
+  matcher: ['/((?!api/|_next/static|_next/image|favicon.ico).*)'],
   // If empirical testing (once Horace provisions real DATABASE_URL/OAuth
   // credentials — this repo has neither yet) shows the Edge runtime rejects the
   // Drizzle/neon-http adapter call inside auth() above, uncomment:
