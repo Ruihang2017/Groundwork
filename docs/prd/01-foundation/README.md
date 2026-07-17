@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| 版本 | v0.2 |
+| 版本 | v0.4 |
 | 日期 | 2026-07-18 |
 | 上游 | [docs/PRD.md](../../PRD.md) §8, §5.5, §5.6, §10 P0 |
 | 状态 | Draft → Gate 1 评审 |
@@ -72,6 +72,7 @@
 
 ## Changelog
 
+- v0.4（2026-07-18）：FND-05 回写——`db/**`（Drizzle schema + Neon 客户端 + 初始迁移）落地。三项决策/偏差记录如下（详见 FND-05 票据 Changelog v0.1）：(1) **时间戳列统一用 `bigint` epoch-ms，不用原生 `timestamp`**（唯一例外 `users.emailVerified` 依 Auth.js adapter 的 `Date` 契约）——与 FND-02/FND-04 每个 Zod schema 的 `z.number()` 时间字段 1:1 对应、零转换层。这是**全仓库层面的既定约定**，下游每张 Drizzle 表（FND-08、PLT-04）与每个 query helper 直接继承，无需重新决定；若日后要改回原生 timestamp，需迁移每行数据并改每处调用点（触发 ADR）。(2) **本地 Postgres 测试替身用 PGlite，不用 pg-mem**：票据点名的 `pg-mem` 与 `drizzle-orm` 的 node-postgres driver 根本不兼容（拒绝 drizzle 的 `getTypeParser` 与 `rowMode: 'array'`）；改用 `@electric-sql/pglite`（编译为 WASM 的真实 Postgres）+ 一等的 `drizzle-orm/pglite` driver/migrator——严格更强的替身（用生产同款 migrator 跑已提交的迁移，并经类型化 query builder 往返真实行）。故 Test-plan item 4 的降级路径（只做静态 SQL 检查）**未被采用**，完整往返覆盖已交付。**下游 FND-06 / FND-10 请复用 `@electric-sql/pglite` + `drizzle-orm/pglite`，而非 pg-mem**，作为本地 Postgres 替身。(3) 将 `vitest.config.ts` 的 `test.include` 扩至含 `'db/**/*.test.ts'`（与 FND-02 为 `lib/**` 做的回写同一先例），否则 `pnpm test` 会假绿（跑 0 条本票断言）。此外，真实 Neon `DATABASE_URL` 的 provisioning 仍是 Horace 的人工验收项（本模块开放问题 #2，未变），本票所有测试均离线运行、不假设 live `DATABASE_URL`。
 - v0.3（2026-07-18）：FND-02 回写——`lib/schemas/entities.ts`（`Profile`/`Project`/`Library`/`Resume` 及推断类型）落地时，将 `vitest.config.ts` 的 `test.include` 从 `['tests/**/*.test.ts']` 扩至含 `'lib/**/*.test.ts'`：FND-01 继承的 glob 不覆盖本票据自指定的测试文件路径 `lib/schemas/entities.test.ts`，否则 `pnpm test` 会假绿（跑 0 条本票断言）。此改动同时为 FND-03/04/06/07/10 的 colocated `lib/**` 测试文件解锁，无需各自再改此共享配置。详见 FND-02 票据 Changelog v0.2。
 - v0.2（2026-07-18）：FND-01 回写（Feedback-obligation #1）——修正**本地**工具链 provisioning。参考开发环境（Node `22.11.0` / Corepack `0.29.4`）上，计划中的 `corepack enable && pnpm install` 会以 `Error: Cannot find matching keyid` 失败：Corepack 内置的 npm registry 签名密钥早于 registry 的密钥轮换，无法验证 pinned 的 `pnpm@10.34.5`。本地正确做法二选一：(a) 使用更新的 Node/Corepack（其内置密钥含轮换后的密钥集），或 (b) 旁路 Corepack 直接装 standalone pnpm——`npm install -g pnpm@10.34.5`，或一次性设 `COREPACK_INTEGRITY_KEYS=0`。**CI 不受影响**：`.github/workflows/ci.yml` 用 `pnpm/action-setup@v4` provision pnpm，它直接下发 pnpm 二进制、从不经 Corepack，故 scaffold（`package.json` pin、lockfile、`ci.yml`）本身正确、无需改动，只欠这条文档回写。回归测试见 `tests/toolchain.test.ts`；对应改动记于 FND-01 票据 Changelog v0.2。
 - v0.1（2026-07-17）：初稿，随 `/breakdown-prd` 生成。
