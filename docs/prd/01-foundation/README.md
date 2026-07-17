@@ -72,5 +72,6 @@
 
 ## Changelog
 
+- v0.3（2026-07-18）：FND-02 回写——`lib/schemas/entities.ts`（`Profile`/`Project`/`Library`/`Resume` 及推断类型）落地时，将 `vitest.config.ts` 的 `test.include` 从 `['tests/**/*.test.ts']` 扩至含 `'lib/**/*.test.ts'`：FND-01 继承的 glob 不覆盖本票据自指定的测试文件路径 `lib/schemas/entities.test.ts`，否则 `pnpm test` 会假绿（跑 0 条本票断言）。此改动同时为 FND-03/04/06/07/10 的 colocated `lib/**` 测试文件解锁，无需各自再改此共享配置。详见 FND-02 票据 Changelog v0.2。
 - v0.2（2026-07-18）：FND-01 回写（Feedback-obligation #1）——修正**本地**工具链 provisioning。参考开发环境（Node `22.11.0` / Corepack `0.29.4`）上，计划中的 `corepack enable && pnpm install` 会以 `Error: Cannot find matching keyid` 失败：Corepack 内置的 npm registry 签名密钥早于 registry 的密钥轮换，无法验证 pinned 的 `pnpm@10.34.5`。本地正确做法二选一：(a) 使用更新的 Node/Corepack（其内置密钥含轮换后的密钥集），或 (b) 旁路 Corepack 直接装 standalone pnpm——`npm install -g pnpm@10.34.5`，或一次性设 `COREPACK_INTEGRITY_KEYS=0`。**CI 不受影响**：`.github/workflows/ci.yml` 用 `pnpm/action-setup@v4` provision pnpm，它直接下发 pnpm 二进制、从不经 Corepack，故 scaffold（`package.json` pin、lockfile、`ci.yml`）本身正确、无需改动，只欠这条文档回写。回归测试见 `tests/toolchain.test.ts`；对应改动记于 FND-01 票据 Changelog v0.2。
 - v0.1（2026-07-17）：初稿，随 `/breakdown-prd` 生成。
