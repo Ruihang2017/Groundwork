@@ -1,0 +1,19 @@
+{
+  "jds": [
+    { "file": "fixtures/jds/ai-ml-engineer-01.md", "category": "ai-ml", "label": "Junior AI/ML Engineer — NLP, customer-support startup" },
+    { "file": "fixtures/jds/ai-ml-engineer-02.md", "category": "ai-ml", "label": "ML Engineer — Mid, computer vision for manufacturing" },
+    { "file": "fixtures/jds/ai-ml-engineer-03.md", "category": "ai-ml", "label": "Senior ML Engineer — MLOps/infra, healthcare" },
+    { "file": "fixtures/jds/ai-ml-engineer-04.md", "category": "ai-ml", "label": "Staff ML Engineer — applied research, forecasting/optimisation" },
+    { "file": "fixtures/jds/ai-ml-engineer-05.md", "category": "ai-ml", "label": "Senior AI Engineer — LLM applications, legal tech" },
+    { "file": "fixtures/jds/senior-swe-01.md", "category": "senior-swe", "label": "Senior Backend Engineer — distributed systems, payments" },
+    { "file": "fixtures/jds/senior-swe-02.md", "category": "senior-swe", "label": "Senior Infrastructure/Platform Engineer — Kubernetes" },
+    { "file": "fixtures/jds/senior-swe-03.md", "category": "senior-swe", "label": "Senior Full-Stack Engineer — product company" },
+    { "file": "fixtures/jds/adversarial-thin.md", "category": "adversarial", "label": "Adversarial — extremely thin JD" },
+    { "file": "fixtures/jds/adversarial-recruiter-fluff.md", "category": "adversarial", "label": "Adversarial — recruiter-padded, buzzword-heavy JD" }
+  ],
+  "resumes": [
+    { "file": "fixtures/resumes/synthetic-junior.md", "seniority": "junior" },
+    { "file": "fixtures/resumes/synthetic-mid.md", "seniority": "mid" },
+    { "file": "fixtures/resumes/synthetic-senior.md", "seniority": "senior" }
+  ]
+}

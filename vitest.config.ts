@@ -26,6 +26,11 @@ export default defineConfig({
       'db/**/*.test.ts',
       '*.test.ts',
       'app/**/*.test.{ts,tsx}',
+      // `fixtures/**/*.test.ts` added by EVL-01 so the new manifest test
+      // (fixtures/manifest.test.ts) is discovered — none of the prior globs
+      // reach fixtures/**. Same false-green failure mode FND-02/05/06/08/09
+      // each fixed for their own new test locations.
+      'fixtures/**/*.test.ts',
     ],
   },
   resolve: {
