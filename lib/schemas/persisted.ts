@@ -110,6 +110,19 @@ export const UsageEvent = z.object({
   costUsd: z.number(),
   durationMs: z.number(),
   createdAt: z.number(), // FND-04 extension (FND-06 daily-window quota queries)
+  // --- FND-10 extension ---------------------------------------------------
+  // Added by FND-10 to satisfy PRD §8.4's "dropped / stage 状态" logging
+  // requirement, absent from §5.6's literal code sketch (§5.6's UsageEvent
+  // code block above lists only tokensIn/tokensOut/searches/costUsd/
+  // durationMs). This is a genuine gap between §5.6's code sketch and §8.4's
+  // prose, resolved here per the FND-10 ticket's own Deliverable 1 decision
+  // rather than silently favoring one PRD section over the other. Both
+  // default so every pre-FND-10 UsageEvent fixture (e.g.
+  // lib/schemas/persisted.test.ts's validUsageEvent) keeps parsing
+  // unmodified — see db/schema.ts's usageEventStatusEnum comment for the
+  // mirrored Drizzle-side note.
+  droppedCount: z.number().default(0),
+  status: z.enum(['success', 'failure']).default('success'),
 });
 export type UsageEvent = z.infer<typeof UsageEvent>;
 
