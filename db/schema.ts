@@ -6,6 +6,7 @@ import {
   numeric,
   pgEnum,
   pgTable,
+  primaryKey,
   text,
   timestamp,
 } from 'drizzle-orm/pg-core';
@@ -37,10 +38,14 @@ import type {
 //    (JS `Date.now()`), NOT native Postgres `timestamp`. This mirrors every
 //    FND-02/FND-04 Zod schema, whose timestamp-shaped fields are all `z.number()`
 //    (epoch-ms), so a Zod-valid fixture round-trips through Drizzle with zero
-//    conversion layer. The one exception is `users.emailVerified`, which stays a
-//    native `timestamp` because its shape is dictated by the Auth.js Drizzle
-//    adapter contract (JS `Date`), not this app's own Zod schemas. Do not "fix"
-//    that exception for consistency — it would break FND-08's adapter wiring.
+//    conversion layer. The exceptions are `users.emailVerified`, `sessions.expires`,
+//    and `verificationTokens.expires` (FND-08), which stay native `timestamp`
+//    columns because their shape is dictated by the Auth.js Drizzle adapter
+//    contract (JS `Date`), not this app's own Zod schemas. Do not "fix" those
+//    exceptions for consistency — it would break FND-08's adapter wiring. Note
+//    `accounts.expires_at` (FND-08) is a plain `integer` holding a raw OAuth2
+//    token-expiry value in UNIX SECONDS (a third-party wire value), NOT one of this
+//    app's own bigint-epoch-ms columns — do not "fix" it to bigint/ms either.
 // 2. `updatedAt` columns use `.$onUpdate(() => Date.now())`. This callback runs
 //    client-side in drizzle-orm at `.update()` time (not inside a DB lock), so
 //    concurrent updates are last-write-wins on `updatedAt` — standard Postgres
@@ -271,3 +276,62 @@ export const evalRuns = pgTable('eval_runs', {
     .notNull()
     .$defaultFn(() => Date.now()),
 });
+
+// --- accounts / sessions / verification_tokens (Auth.js Drizzle-adapter tables) --
+// Column shapes are dictated verbatim by @auth/drizzle-adapter's own Postgres
+// reference schema (node_modules/@auth/drizzle-adapter/lib/pg — the
+// DefaultPostgres*Table types) — do NOT rename any property (JS object key) here
+// for camelCase/consistency with this file's other tables. DrizzleAdapter(db, {
+// accountsTable: accounts, ... }) type-checks each table against those
+// DefaultPostgres*Table types, which require these EXACT property names —
+// including the snake_case-looking refresh_token / access_token / expires_at /
+// token_type / id_token / session_state on accounts (those mirror OAuth2's own
+// wire-format field names, not a style choice). A rename to camelCase produces a
+// compile error at the DrizzleAdapter(...) call site, not a silent runtime bug.
+// DB-level column-name strings (the first arg to text()/integer()/etc.) ARE free
+// to follow this file's own snake_case convention; only the JS property keys are
+// load-bearing. See this file's top-of-file convention comment (point 1) for why
+// `expires` (sessions/verificationTokens) and `expires_at` (accounts) intentionally
+// break the bigint-epoch-ms timestamp convention.
+
+export const accounts = pgTable(
+  'accounts',
+  {
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    type: text('type')
+      .$type<'oauth' | 'oidc' | 'email' | 'webauthn'>()
+      .notNull(),
+    provider: text('provider').notNull(),
+    providerAccountId: text('provider_account_id').notNull(),
+    refresh_token: text('refresh_token'),
+    access_token: text('access_token'),
+    expires_at: integer('expires_at'),
+    token_type: text('token_type'),
+    scope: text('scope'),
+    id_token: text('id_token'),
+    session_state: text('session_state'),
+  },
+  (table) => [
+    primaryKey({ columns: [table.provider, table.providerAccountId] }),
+  ],
+);
+
+export const sessions = pgTable('sessions', {
+  sessionToken: text('session_token').primaryKey(),
+  userId: text('user_id')
+    .notNull()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  expires: timestamp('expires', { mode: 'date' }).notNull(),
+});
+
+export const verificationTokens = pgTable(
+  'verification_tokens',
+  {
+    identifier: text('identifier').notNull(),
+    token: text('token').notNull(),
+    expires: timestamp('expires', { mode: 'date' }).notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.identifier, table.token] })],
+);
