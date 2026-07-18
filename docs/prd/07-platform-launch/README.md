@@ -65,3 +65,9 @@ PRD §3 C5（上线基线）："注册登录、用量配额、隐私政策与删
 ## Changelog
 
 - v0.1（2026-07-17）：初稿，随 `/breakdown-prd` 生成。
+- v0.2（2026-07-18，PLT-01 Builder writeback）：PLT-01（隐私政策/ToS 页 + 账号硬删）实现完成。全套测试 269 通过（27 文件），无 env var 的 `pnpm build` exit 0，lint clean。构建期 deviations（详见 `tickets/PLT-01-privacy-tos-account-delete.md` 的 Changelog）：
+  - `db/index.ts` 追加 `dbTx` 导出（`drizzle-orm/neon-serverless`，纯 append，现有 `db` 导出不变）——neon-http 的 `.transaction()` 无条件抛错，无法满足 Deliverable 2(b)"单事务"要求；这是 `db/index.ts` 自身注释预授权的 swap。属跨模块 File-scope deviation，已在票据内记录并标记给 Reviewer。
+  - `package.json`/`pnpm-lock.yaml` 追加 `ws`（dependency）+ `@types/ws`（devDependency），neon-serverless 的 WebSocket 传输所需；`ws` 显式传入以消除运行时原生 WebSocket 依赖的不确定性。
+  - `middleware.ts` 追加 `/privacy`、`/tos` 到 `PUBLIC_PATHS`（票据 File-scope 已授权）；`middleware.test.ts` 追加对应 pass-through 断言。
+  - ON DELETE CASCADE 已核对（Feedback obligation #1）：显式逐表删除与 DB 级 cascade 在单事务内严格顺序执行，不竞争；显式删除作为防御性冗余保留，使回滚原子性测试有意义。
+  - 隐私政策/ToS 文案为诚实草稿，待 Horace 的 `[human]` 法务审阅（模块级验收 `[human]` 项之一），每条声明均可追溯到已合并的真实机制。

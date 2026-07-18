@@ -31,3 +31,25 @@ describe('db/index — fail-fast on missing DATABASE_URL', () => {
     expect(mod.db).toBeDefined();
   });
 });
+
+// PLT-01 additive `dbTx` export (neon-serverless, transaction-capable). Same two
+// invariants as `db` above: fail-fast when DATABASE_URL is unset, and lazy
+// construction (no network) with a dummy URL. The fail-fast is a single
+// module-level throw shared by both exports, so the "unset → reject" case is
+// exercised here against the same import for `dbTx`'s sake explicitly.
+describe('db/index — dbTx (transaction-capable export)', () => {
+  it('the module import rejects (mentioning DATABASE_URL) when the env var is unset — dbTx is never constructed', async () => {
+    delete process.env.DATABASE_URL;
+    await expect(import('@/db/index')).rejects.toThrow(/DATABASE_URL/);
+  });
+
+  it('constructs dbTx with a transaction() method (no throw, no network call) with a dummy URL', async () => {
+    process.env.DATABASE_URL = 'postgresql://user:pass@fake-host.example.invalid/db';
+    const mod = await import('@/db/index');
+    expect(mod.dbTx).toBeDefined();
+    // The whole point of this export: it exposes a real interactive transaction
+    // API (unlike neon-http's `db`, whose .transaction() throws). Constructing
+    // it must not open a socket — the Pool is lazy until the first query.
+    expect(typeof mod.dbTx.transaction).toBe('function');
+  });
+});
