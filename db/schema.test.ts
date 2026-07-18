@@ -11,6 +11,7 @@ import {
   resumes,
   tailoredResumes,
   usageEvents,
+  usageEventStatusEnum,
   usageOpEnum,
   users,
 } from '@/db/schema';
@@ -61,6 +62,8 @@ const expectedColumns: Record<string, string[]> = {
     'costUsd',
     'durationMs',
     'createdAt',
+    'droppedCount', // FND-10 extension
+    'status', // FND-10 extension
   ],
   eval_runs: ['id', 'suite', 'op', 'passRate', 'details', 'createdAt'],
 };
@@ -170,6 +173,14 @@ describe('db/schema — pg enums', () => {
 
   it('evalSuiteEnum matches EvalSuite', () => {
     expect(evalSuiteEnum.enumValues).toEqual(['q1', 'q2', 'q3']);
+  });
+
+  it('usageEventStatusEnum has exactly success/failure (FND-10 extension)', () => {
+    expect(usageEventStatusEnum.enumValues).toEqual(['success', 'failure']);
+  });
+
+  it('usage_events.status uses the usageEventStatusEnum pg enum type', () => {
+    expect(getTableColumns(usageEvents).status.enumValues).toEqual(usageEventStatusEnum.enumValues);
   });
 
   it('jobs.status / usage_events.op / eval_runs.suite / eval_runs.op use the pg enum types', () => {

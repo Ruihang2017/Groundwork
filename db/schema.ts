@@ -83,6 +83,12 @@ export const usageOpEnum = pgEnum('usage_op', [
 // matches lib/schemas/persisted.ts EvalSuite
 export const evalSuiteEnum = pgEnum('eval_suite', ['q1', 'q2', 'q3']);
 
+// FND-10 extension — matches lib/schemas/persisted.ts's UsageEvent.status
+// field. Added by FND-10 to satisfy PRD §8.4's "dropped / stage 状态"
+// logging requirement, absent from §5.6's literal code sketch. Not reused by
+// any other table (unlike usageOpEnum, which eval_runs.op also uses).
+export const usageEventStatusEnum = pgEnum('usage_event_status', ['success', 'failure']);
+
 // --- users --------------------------------------------------------------------
 // Auth.js Drizzle-adapter-compatible base shape. FND-08 appends
 // accounts/sessions/verificationTokens next to this table in the same file.
@@ -252,6 +258,14 @@ export const usageEvents = pgTable(
     createdAt: bigint('created_at', { mode: 'number' })
       .notNull()
       .$defaultFn(() => Date.now()),
+    // FND-10 extension (see usageEventStatusEnum above + lib/schemas/
+    // persisted.ts's UsageEvent for the parallel Zod-side note). Both
+    // NOT NULL with a DB-level default so FND-05's own pre-existing
+    // db/migrate.test.ts Tier-3 insert (written before this extension
+    // existed, and not updated to supply these two columns — see §0) keeps
+    // round-tripping unmodified.
+    droppedCount: integer('dropped_count').notNull().default(0),
+    status: usageEventStatusEnum('status').notNull().default('success'),
   },
   (table) => [
     index('usage_events_user_op_created_idx').on(
