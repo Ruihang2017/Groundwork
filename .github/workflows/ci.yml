@@ -28,3 +28,15 @@ jobs:
 
       - name: Build
         run: pnpm build
+
+      # FND-09 Deliverable 5. Deploys only from `main` pushes (never PRs/feature
+      # branches, even after Horace adds real secrets — defense-in-depth on top of
+      # the script's own no-op guard). The script no-ops (exit 0) when VERCEL_TOKEN
+      # is absent, so CI never hard-fails before the Vercel project is provisioned.
+      - name: Deploy to Vercel
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        run: node .github/scripts/deploy-vercel.mjs
