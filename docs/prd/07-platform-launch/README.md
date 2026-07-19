@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| 版本 | v0.1 |
+| 版本 | v0.3 |
 | 日期 | 2026-07-17 |
 | 上游 | [docs/PRD.md](../../PRD.md) §3 C5, §8.3, §8.4, §9, §10 P5 |
 | 状态 | Draft → Gate 1 评审 |
@@ -71,3 +71,9 @@ PRD §3 C5（上线基线）："注册登录、用量配额、隐私政策与删
   - `middleware.ts` 追加 `/privacy`、`/tos` 到 `PUBLIC_PATHS`（票据 File-scope 已授权）；`middleware.test.ts` 追加对应 pass-through 断言。
   - ON DELETE CASCADE 已核对（Feedback obligation #1）：显式逐表删除与 DB 级 cascade 在单事务内严格顺序执行，不竞争；显式删除作为防御性冗余保留，使回滚原子性测试有意义。
   - 隐私政策/ToS 文案为诚实草稿，待 Horace 的 `[human]` 法务审阅（模块级验收 `[human]` 项之一），每条声明均可追溯到已合并的真实机制。
+- v0.3（2026-07-19，PLT-02 Builder writeback）：PLT-02（每周备份流水线）实现完成。全套测试 278 通过（29 文件，新增 `tests/backup.test.ts` 4 项）；无新增运行时依赖（`backup.mjs` 直接 shell 调用 `pg_dump`/`aws` 二进制，未动 `package.json`）。新增 `.github/workflows/backup.yml`（每周 `schedule` cron + `workflow_dispatch`）、`.github/scripts/backup.mjs`（沿用 FND-09 `deploy-vercel.mjs` 的 no-op 守卫模式：R2/DB 凭据缺失时 exit 0 并打印跳过日志）、`tests/backup.test.ts`、`docs/ops/backup.md`（人工恢复手册），并向 `.env.example` 追加 `R2_*` 注释块。构建期 deviations（详见 `tickets/PLT-02-backup-pipeline.md` 的 Changelog）：
+  - `.github/scripts/backup.mjs`、`tests/backup.test.ts`、`.env.example` 未字面列于票据 File-scope，但由票据 Test-plan/Deliverable 1 明文要求，属 File-scope 窄于 Deliverables 的既有缺口（同 FND-09 对 `deploy-vercel.mjs` 的处理），已在票据内记录并标记给 Reviewer。
+  - workflow YAML 校验采用正则/子串断言（非真实 YAML parser），沿用 `tests/toolchain.test.ts` 对 `ci.yml` 的先例，避免为单条断言引入 `yaml` 依赖（plan §5 Q2，Builder 裁量）。
+  - `.env.example` 的四个 `R2_*` 键以 `#` 注释形式追加，与文件中已有的裸 `KEY=` 运行时行做排版区分，强调其为 CI-only 的 GitHub Actions 仓库密钥、非 `.env.local` 值（plan §5 Q3）——这与 FND-09 完全不写入 `.env.example` 的先例有意分歧，因 PLT-02 票据明文要求追加。
+  - Neon pooled-vs-direct 端点问题（票据 Feedback obligation #2）离线不可验证：`pg_dump` 对 pooled（`-pooler`/PgBouncer 事务池）端点可能失败，需改用 direct/unpooled 端点；该失败模式已前置写入 `docs/ops/backup.md` 的 Troubleshooting，待 Horace 真实 `DATABASE_URL` 就绪后于票据 Changelog 回填实际可用端点。
+  - `[human]` 项仍开放：Horace 需自建 Cloudflare R2 bucket、配置 5 个 GitHub Actions 仓库密钥（含独立于 Vercel 的 `DATABASE_URL`），并经 Actions 页 `workflow_dispatch` 触发一次真实备份端到端验证，方可 P5 sign-off。
