@@ -40,9 +40,9 @@ You do not have to wait for the Sunday schedule. The workflow also has a
 the secrets and confirm a fresh `backup-YYYYMMDD.sql.gz` appears in the bucket.
 
 > Do **not** try to run `.github/scripts/backup.mjs` on a plain Windows `cmd`/PowerShell
-> shell — its real path shells out to `sh -c 'pg_dump ... | gzip > ...'`, which needs a
-> POSIX shell. The intended manual path is the Actions **Run workflow** button (which
-> runs on `ubuntu-latest`), not local execution.
+> shell — its real path shells out to `bash -c 'set -o pipefail; pg_dump ... | gzip > ...'`,
+> which needs a POSIX shell (and `bash`, for `pipefail`). The intended manual path is the
+> Actions **Run workflow** button (which runs on `ubuntu-latest`), not local execution.
 
 ## Restore procedure
 
@@ -103,6 +103,15 @@ told not to put them in `.env.local`.
   `R2_ENDPOINT` is unset, mirroring FND-09's deploy no-op. The bracketed `missing:` list
   names exactly which secret(s) to add. Fix: add the named repository secret(s), then
   re-run.
+- **The workflow run is red and there is no `backup-…sql.gz` in the bucket.** This is the
+  **intended fail-closed behaviour** — a `pg_dump` failure now aborts the run instead of
+  silently uploading an empty archive. The dump runs under `bash -o pipefail`, so an auth
+  error, an unreachable host, a mid-stream disconnect (truncated dump), or a Neon pooler
+  protocol failure propagates as a non-zero exit even though `gzip` at the tail of the
+  pipeline would otherwise have "succeeded". As a second guard, an empty/near-empty dump is
+  rejected before upload (log line `refusing to upload an empty backup`). Read the step log
+  for the underlying `pg_dump` error and fix its cause (most commonly the pooled-endpoint
+  issue below) — never treat a red run as "the backup probably still worked".
 - **`pg_dump` fails with a connection/protocol error against a `-pooler` host.** Neon
   issues both a **pooled** endpoint (hostname suffixed `-pooler`, PgBouncer in
   transaction-pooling mode) and a **direct/unpooled** endpoint. `pg_dump` should target
@@ -113,6 +122,23 @@ told not to put them in `.env.local`.
   (it can differ from the app's own pooled runtime `DATABASE_URL` — they are separate
   secret stores). This is unverifiable until a real Neon `DATABASE_URL` exists (ticket
   Feedback obligation #2); record whichever endpoint ended up working in the ticket's
-  Changelog when you confirm the first real run.
+  Changelog when you confirm the first real run. With the pipefail fix above, this failure
+  is now loud (red run) instead of a silent empty upload.
+- **`pg_dump: error: aborting because of server version mismatch` (server is newer than
+  the client).** `pg_dump` refuses to dump a server whose major version is **newer** than
+  the client binary. ubuntu-24.04's stock apt repo only ships `postgresql-client` **16**,
+  while Neon's current default for new projects is Postgres **17** — so the workflow does
+  **not** install the stock package. Instead it adds the official PGDG apt repo and installs
+  a version-pinned client via the `PG_MAJOR` env in `.github/workflows/backup.yml`'s
+  "Install PostgreSQL client tools" step (default `17`). If you provisioned a **different**
+  Neon major, bump `PG_MAJOR` to **match or exceed the server major** (a client can always
+  dump its own major and any older server, so pinning too high is safe; too low aborts). The
+  step ends with `pg_dump --version`, so the installed client major is visible at the top of
+  the run log for confirmation.
+- **`You must specify a region` from `aws s3 cp`.** Should not occur — the script sets
+  `AWS_DEFAULT_REGION=auto` (Cloudflare R2's prescribed value) for the upload, since
+  GitHub-hosted runners have no ambient AWS region and AWS CLI v2 hard-fails without one.
+  Do **not** add an `AWS_DEFAULT_REGION` repository secret; the region is not a secret and
+  is wired in `.github/scripts/backup.mjs`.
 - **`aws: command not found`.** The `ubuntu-latest` runner ships AWS CLI v2 pre-installed;
   if a future runner image drops it, add an explicit install step before "Run backup".

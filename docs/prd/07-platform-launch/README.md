@@ -77,3 +77,8 @@ PRD §3 C5（上线基线）："注册登录、用量配额、隐私政策与删
   - `.env.example` 的四个 `R2_*` 键以 `#` 注释形式追加，与文件中已有的裸 `KEY=` 运行时行做排版区分，强调其为 CI-only 的 GitHub Actions 仓库密钥、非 `.env.local` 值（plan §5 Q3）——这与 FND-09 完全不写入 `.env.example` 的先例有意分歧，因 PLT-02 票据明文要求追加。
   - Neon pooled-vs-direct 端点问题（票据 Feedback obligation #2）离线不可验证：`pg_dump` 对 pooled（`-pooler`/PgBouncer 事务池）端点可能失败，需改用 direct/unpooled 端点；该失败模式已前置写入 `docs/ops/backup.md` 的 Troubleshooting，待 Horace 真实 `DATABASE_URL` 就绪后于票据 Changelog 回填实际可用端点。
   - `[human]` 项仍开放：Horace 需自建 Cloudflare R2 bucket、配置 5 个 GitHub Actions 仓库密钥（含独立于 Vercel 的 `DATABASE_URL`），并经 Actions 页 `workflow_dispatch` 触发一次真实备份端到端验证，方可 P5 sign-off。
+- v0.4（2026-07-20，PLT-02 Reviewer bounce fix）：Reviewer 判定 BOUNCE，四项 finding 全部修复并补回归测试。全套测试 **290 通过（29 文件，`tests/backup.test.ts` 由 4 增至 16 项）**。详见 `tickets/PLT-02-backup-pipeline.md` 的 Changelog v0.2；要点：
+  - **[blocker] 静默备份损坏**：`pg_dump | gzip` 原以 `sh -c` 运行，POSIX 管道只回报末端 gzip 的退出码，`pg_dump` 失败（认证/连接错误、中途断连截断、Neon pooler 协议错误）时仍上传一个结构合法但空/截断的 `.sql.gz` 且 workflow 转绿——正是 PRD §5.6 备份要防的资产丢失。改为 `bash -o pipefail`（dash 不可靠支持 pipefail，故用 bash）使 `pg_dump` 失败传播为非零；并加上传前最小体积守卫（`MIN_BACKUP_BYTES`）作为纵深防御，拒绝空归档。
+  - **[major] 上传无 region 必失败**：`aws s3 cp` 未设 region，GitHub runner 无环境/配置 region，AWS CLI v2 硬失败（"You must specify a region"）——首次真实运行必然在上传步骤失败，`[human]` 端到端验收无法通过。修复：上传子进程注入 `AWS_DEFAULT_REGION=auto`（Cloudflare R2 规定值）。
+  - **[minor] pg_dump 客户端/服务端主版本不匹配**：ubuntu-24.04 stock `postgresql-client` 为 v16，而 Neon 新项目默认 Postgres 17，服务端主版本更新时 `pg_dump` 直接 abort。改为加装官方 PGDG apt 源并按 `PG_MAJOR`（默认 17）安装版本对齐的 client；`docs/ops/backup.md` Troubleshooting 补该失败模式与「按 Neon 主版本 bump `PG_MAJOR`」的指引。
+  - **[blocker] 评审工件完整性**：上述 finding 1–2 的修复原仅存在于工作树、未落 commit，CLEAR 合并会漏掉修复。本次将全部修复 + changelog 回写落入 commit，使 diff 自身即含修复。
