@@ -7,6 +7,7 @@ import {
   assertQ1Questions,
   assertQ1Schema,
 } from './assertions/q1.ts';
+import { loadFixtures } from './fixtures.ts';
 import { runSuite } from './run-suite.ts';
 import type { judgeCall } from './judge.ts';
 import type { JdExtract, Ledger, Rehearse } from '../lib/schemas/pipeline.ts';
@@ -141,6 +142,22 @@ const mockJudgeCall: typeof judgeCall = async (prompt) =>
 async function main(): Promise<void> {
   let failures = 0;
 
+  // Deliverable 7 — self-check "loads fixtures/manifest.json ...": exercise the
+  // real loadFixtures() under plain `node --experimental-strip-types`, so the
+  // fixture-loading runtime this ticket exists to prove is actually run by
+  // `pnpm eval` (not only by the alias-aware Vitest suite). This guards the
+  // hazard class docs/plans/EVL-02.md §2.1 documents — a future non-plain-Node-
+  // safe import (an `@/`-alias or extensionless import) creeping into
+  // fixtures.ts would break here under plain Node while the Vitest suite stayed
+  // green. Restores the Deliverable-7 clause the plan §2.10 silently dropped
+  // (see the EVL-02 Reviewer finding).
+  const fixtures = loadFixtures();
+  const fixturesOk = fixtures.jds.length > 0 && fixtures.resumes.length > 0;
+  console.log(
+    `${fixturesOk ? 'OK  ' : 'FAIL'} fixtures loaded (${fixtures.jds.length} jds, ${fixtures.resumes.length} resumes)`,
+  );
+  if (!fixturesOk) failures += 1;
+
   for (const testCase of cases) {
     const pass = testCase.run();
     const ok = pass === testCase.expectPass;
@@ -183,7 +200,8 @@ async function main(): Promise<void> {
   if (!q2Ok) failures += 1;
   if (!q3Ok) failures += 1;
 
-  const total = cases.length + 2;
+  // cases + Q2 batch + Q3 batch + the fixtures-loaded check.
+  const total = cases.length + 3;
   console.log('');
   console.log(
     `eval self-check: ${failures === 0 ? 'PASS' : 'FAIL'} (${total} checks, ${failures} failing)`,
