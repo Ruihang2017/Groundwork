@@ -94,4 +94,18 @@ describe('middleware — request handling (acceptance item 3)', () => {
     expect(isRedirect(res)).toBe(false);
     expect(res.headers.get('x-middleware-next')).toBe('1');
   });
+
+  // PLT-01 — legal pages (app/(legal)/**) must be reachable by logged-out
+  // visitors (e.g. before signing up). Same pass-through shape as / and /signin.
+  it('lets "/privacy" through even when unauthenticated (PLT-01 legal page)', () => {
+    const res = runMiddleware(fakeReq('/privacy', null)) as Response;
+    expect(isRedirect(res)).toBe(false);
+    expect(res.headers.get('x-middleware-next')).toBe('1');
+  });
+
+  it('lets "/tos" through even when unauthenticated (PLT-01 legal page)', () => {
+    const res = runMiddleware(fakeReq('/tos', null)) as Response;
+    expect(isRedirect(res)).toBe(false);
+    expect(res.headers.get('x-middleware-next')).toBe('1');
+  });
 });

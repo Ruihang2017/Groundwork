@@ -12,6 +12,8 @@ import { auth } from '@/auth';
 const PUBLIC_PATHS = new Set<string>([
   '/', // app/page.tsx — public landing page
   '/signin', // app/(auth)/signin/page.tsx (FND-09) — must stay reachable while logged out
+  '/privacy', // app/(legal)/privacy/page.tsx (PLT-01) — legal page, readable while logged out
+  '/tos', // app/(legal)/tos/page.tsx (PLT-01) — legal page, readable while logged out
 ]);
 
 export default auth((req) => {
