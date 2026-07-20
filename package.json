@@ -12,6 +12,7 @@
     "build": "next build",
     "start": "next start",
     "test": "vitest run",
+    "eval": "node scripts/eval.mjs",
     "lint": "eslint .",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate"

@@ -31,6 +31,10 @@ export default defineConfig({
       // reach fixtures/**. Same false-green failure mode FND-02/05/06/08/09
       // each fixed for their own new test locations.
       'fixtures/**/*.test.ts',
+      // `eval/**/*.test.ts` added by EVL-02 so eval/**'s new test files are
+      // discovered — none of the prior globs reach eval/**. Same false-green
+      // failure mode every prior FND/EVL ticket fixed for its own test location.
+      'eval/**/*.test.ts',
     ],
   },
   resolve: {
