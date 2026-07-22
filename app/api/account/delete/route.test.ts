@@ -2,7 +2,7 @@ import { PGlite } from '@electric-sql/pglite';
 import { eq, getTableName } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/pglite';
 import { migrate } from 'drizzle-orm/pglite/migrator';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import * as schema from '@/db/schema';
 
@@ -218,6 +218,20 @@ function withFailingDeleteOn(db: TestDb, tableName: string): TestDb {
 afterEach(() => {
   mockAuth.mockReset();
   mockSignOut.mockReset();
+});
+
+// ISS-29: every test in this file boots a fresh PGlite (Postgres-in-WASM) and runs
+// the real db/migrations chain inside it(); under full-suite load (37 files fanned
+// across one forked worker per core) the file's first test also pays the worker's
+// one-time WASM compile and has been measured at 4676ms against Vitest's 5000ms
+// default — and timed out outright in issue #29's runs. File-scoped raise only:
+// vi.resetConfig() below restores the default, so no other file's 5000ms ceiling moves.
+beforeAll(() => {
+  vi.setConfig({ testTimeout: 30_000 });
+});
+
+afterAll(() => {
+  vi.resetConfig();
 });
 
 describe('POST /api/account/delete', () => {
