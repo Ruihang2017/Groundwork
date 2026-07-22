@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 // Mock @/auth so `auth(handler)` is a pass-through that hands back the inner
 // request handler unchanged — this lets the test capture and invoke the handler
@@ -107,5 +107,82 @@ describe('middleware — request handling (acceptance item 3)', () => {
     const res = runMiddleware(fakeReq('/tos', null)) as Response;
     expect(isRedirect(res)).toBe(false);
     expect(res.headers.get('x-middleware-next')).toBe('1');
+  });
+});
+
+// --- PLT-03: the /admin allowlist gate ---------------------------------------
+// APPENDED to this 01-foundation-owned file; nothing above is restructured. The
+// existing fakeReq/isRedirect helpers are reused verbatim.
+//
+// vi.stubEnv works here WITHOUT vi.resetModules() because
+// app/(admin)/_lib/admin-access.ts reads process.env at CALL time — if that ever
+// gets cached at module scope these tests silently assert against a stale value.
+describe('middleware — /admin allowlist gate (PLT-03 acceptance item 4)', () => {
+  const admin = { user: { id: 'u1', email: 'admin@example.com' } };
+  const nonAdmin = { user: { id: 'u2', email: 'nobody@example.com' } };
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('[machine] REJECTS /admin with 403 for a session whose email is NOT in ADMIN_EMAILS', () => {
+    vi.stubEnv('ADMIN_EMAILS', 'admin@example.com');
+    const res = runMiddleware(fakeReq('/admin', nonAdmin)) as Response;
+    expect(res.status).toBe(403);
+    // 403, not a redirect: unambiguous, cannot loop, and does not bounce an
+    // already-authenticated user to a sign-in page they are already past.
+    expect(isRedirect(res)).toBe(false);
+  });
+
+  it('[machine] ALLOWS /admin for an allowlisted email (pass-through, no redirect)', () => {
+    vi.stubEnv('ADMIN_EMAILS', 'admin@example.com');
+    const res = runMiddleware(fakeReq('/admin', admin)) as Response;
+    expect(isRedirect(res)).toBe(false);
+    expect(res.status).not.toBe(403);
+    expect(res.headers.get('x-middleware-next')).toBe('1');
+  });
+
+  it('[machine] still redirects an UNAUTHENTICATED /admin request to /signin (pre-existing behavior preserved)', () => {
+    vi.stubEnv('ADMIN_EMAILS', 'admin@example.com');
+    const res = runMiddleware(fakeReq('/admin', null)) as Response;
+    expect(isRedirect(res)).toBe(true);
+    expect(res.headers.get('location')).toMatch(/\/signin$/);
+  });
+
+  it('[machine] FAILS CLOSED: 403 even for the "right" email when ADMIN_EMAILS is unset (R1)', () => {
+    vi.stubEnv('ADMIN_EMAILS', undefined);
+    const res = runMiddleware(fakeReq('/admin', admin)) as Response;
+    expect(res.status).toBe(403);
+  });
+
+  it('[machine] gates SUB-PATHS of /admin too, not just the exact path', () => {
+    vi.stubEnv('ADMIN_EMAILS', 'admin@example.com');
+    expect((runMiddleware(fakeReq('/admin/usage', nonAdmin)) as Response).status).toBe(403);
+    expect(
+      (runMiddleware(fakeReq('/admin/usage', admin)) as Response).headers.get('x-middleware-next'),
+    ).toBe('1');
+  });
+
+  it('[machine] is SEGMENT-scoped: /administrators is NOT swallowed by the /admin gate (R5, same bug class as finding #3)', () => {
+    vi.stubEnv('ADMIN_EMAILS', 'admin@example.com');
+    for (const path of ['/administrators', '/admin-guide', '/adminfoo']) {
+      const res = runMiddleware(fakeReq(path, nonAdmin)) as Response;
+      expect(res.status).not.toBe(403);
+      expect(res.headers.get('x-middleware-next')).toBe('1');
+    }
+  });
+
+  it('[machine] gates nothing else: /settings is an unchanged pass-through for a non-admin', () => {
+    vi.stubEnv('ADMIN_EMAILS', 'admin@example.com');
+    const res = runMiddleware(fakeReq('/settings', nonAdmin)) as Response;
+    expect(isRedirect(res)).toBe(false);
+    expect(res.status).not.toBe(403);
+    expect(res.headers.get('x-middleware-next')).toBe('1');
+  });
+
+  it('[machine] the existing matcher already covers /admin — no matcher change was needed', () => {
+    const re = new RegExp(`^${(config.matcher as string[])[0]}$`);
+    expect(re.test('/admin')).toBe(true);
+    expect(re.test('/admin/usage')).toBe(true);
   });
 });

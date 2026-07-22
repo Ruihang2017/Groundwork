@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 
+import { isAdminEmail } from '@/app/(admin)/_lib/admin-access';
 import { auth } from '@/auth';
 
 // Route groups (app/(app)/**, app/(auth)/**, app/(legal)/**) are invisible in the
@@ -16,6 +17,18 @@ const PUBLIC_PATHS = new Set<string>([
   '/tos', // app/(legal)/tos/page.tsx (PLT-01) — legal page, readable while logged out
 ]);
 
+// PLT-03 — /admin is served by app/(admin)/admin/page.tsx. Route groups are
+// invisible in request URLs (see this file's header comment above), so the
+// ticket's "gate app/(admin)/**" is implemented as a pathname test on '/admin',
+// never as a literal '(admin)' segment.
+//
+// SEGMENT-SCOPED on purpose, exactly like the `api/` lookahead in config.matcher
+// below (FND-08 Reviewer finding #3): a bare startsWith('/admin') would also
+// swallow a future '/administrators' or '/admin-guide' page.
+function isAdminPath(pathname: string): boolean {
+  return pathname === '/admin' || pathname.startsWith('/admin/');
+}
+
 export default auth((req) => {
   const { pathname } = req.nextUrl;
 
@@ -26,6 +39,22 @@ export default auth((req) => {
   if (!req.auth) {
     const signInUrl = new URL('/signin', req.nextUrl.origin);
     return NextResponse.redirect(signInUrl);
+  }
+
+  // PLT-03 — admin gate. Runs AFTER the auth check above, so an unauthenticated
+  // /admin request keeps redirecting to /signin exactly as before this append.
+  // 403 rather than a redirect (the ticket allows either): it is unambiguous in
+  // a test, cannot loop, and does not bounce an already-authenticated user back
+  // to a sign-in page they are already past. The body stays a bare 'Forbidden' —
+  // no diagnostics, no echo of the email.
+  //
+  // This is the EARLY, cheap gate, not the authoritative one: middleware runs in
+  // a different runtime with its own env semantics (see admin-access.ts) and
+  // Next.js middleware has a documented history of framework-level bypass
+  // classes. app/(admin)/admin/page.tsx repeats the check before touching any
+  // data — do not delete that one on the grounds that "middleware handles it".
+  if (isAdminPath(pathname) && !isAdminEmail(req.auth.user?.email)) {
+    return new NextResponse('Forbidden', { status: 403 });
   }
 
   return NextResponse.next();
