@@ -147,3 +147,76 @@ No `[human]` criteria — this is a self-contained, mechanically verifiable infr
 2. If `git add --renormalize .` (Deliverable 2) turns up any file with a diff beyond pure line-ending changes, or any path the Builder cannot confirm is safe to renormalize (in particular anything that would match the binary-extension list even though today's scan found none), stop before committing it: exclude that specific path with a targeted `-text` (or path-specific) override added to `.gitattributes`, and record the exclusion plus the reason in this ticket's Changelog. Do not force-renormalize a file whose safety cannot be confirmed.
 3. Scheduling note for whoever sequences the next milestone batch (not this ticket's job to enforce, only to flag): because this ticket's renormalization pass is repo-wide by construction, it should merge to `main` before `LIB-01`, `LIB-02`, `LIB-03`, `FIT-01`, `FIT-02`, `FIT-03`, `TLR-01`, `TLR-02`, `PRP-01`, `PRP-02`, `PRP-03`, `PRP-04`, `PLT-03`, or `PLT-04` are branched (File-scope). None of the 14 are in flight as of this ticket's authoring — this is a forward-looking scheduling note, not a blocker discovered mid-ticket. If, contrary to the authoring-time state recorded in Background, the Builder finds one of those 14 already has a branch cut by the time this ticket is built, stop and escalate under Rule 1's general clause rather than silently proceeding or rebasing it.
 4. This ticket closes the false-red Definition-of-Done risk documented in issue #30's "Impact/urgency" (the proximate cause of PLT-02 (#26)'s historical `dodPassed=false`, though PLT-02 is already merged and not itself blocked by this ticket) for every future ticket delivery. Once merged with both fresh-materialization test runs green, that is the full scope of this ticket; re-verifying any specific past ticket's Definition-of-Done status is `/verify-delivery`'s job, not this ticket's.
+
+## Changelog
+
+### v0.1 (2026-07-22, ISS-30 Builder writeback)
+
+Built on branch `ticket/ISS-30` from `main` @ `7a55be3`. Plan followed as written (`docs/plans/ISS-30.md`); no deviations.
+
+**Rule shape chosen: option (a), repo-wide `* text=auto eol=lf`** (plan §2.2). Why: the repo is provably text-only today (195 tracked files, extension tally text-only, binary-extension scan empty, 0 CR bytes across all blobs); a targeted per-extension list would need ≥12 patterns today and would silently miss whatever file type the next of the 14 queued tickets introduces — the catch-all kills the bug class rather than one instance, with no further `.gitattributes` edits ever needed for it. The mandatory justification is written into `.gitattributes` itself as the `# ISS-30: ...` comment.
+
+**Ordering confirmation (acceptance item 2 / plan §2.1).** The catch-all was placed FIRST and the two pre-existing `.claude/**` lines LAST, verbatim — commit A's diff is `1 file changed, 3 insertions(+)`, zero deletions, so the existing lines are byte-identical. gitattributes resolution is last-match-wins per attribute, so those paths still resolve through their own unconditional rules: `git check-attr text eol` reports `text: set` / `eol: lf` for `.claude/workflows/run-milestone.js` and `.claude/scripts/publish-tickets.mjs` (i.e. `text` *set*, not `auto` — unchanged from before the edit), and `git ls-files --eol .claude/workflows/ .claude/scripts/` shows all six files at `i/lf w/lf attr/text eol=lf`, the identical string as before. Both orderings resolve those paths to LF; this ordering makes the no-change property exact.
+
+**Renormalization pass (Deliverable 2 / acceptance item 6): run once, confirmed a no-op — commit B skipped, not forced.** Run immediately after commit A:
+
+```
+$ git add --renormalize .
+(exit 0, no output)
+$ git status --porcelain
+(empty)
+$ git diff --cached --stat
+(empty)
+$ git diff --cached --name-only | wc -l
+0
+```
+
+Zero files needed rewriting, matching the Background full-blob scan's expectation. Per Deliverable 2 no empty commit was forced; this entry is the required record. No `-text` exclusion was needed (Feedback obligation 2 did not trigger — nothing was staged to inspect).
+
+**Regression baseline — the red was forced and observed first (Test plan step 1).** From clean `ticket/ISS-30` before commit A:
+
+```
+$ rm tests/backup.test.ts .github/scripts/backup.mjs
+$ git -c core.autocrlf=true checkout -- tests/backup.test.ts .github/scripts/backup.mjs
+$ tr -dc '\r' < tests/backup.test.ts | wc -c        -> 242     (exactly issue #30's number)
+$ tr -dc '\r' < .github/scripts/backup.mjs | wc -c  -> 154
+$ git ls-files --eol tests/backup.test.ts .github/scripts/backup.mjs
+  i/lf  w/crlf  attr/    tests/backup.test.ts
+  i/lf  w/crlf  attr/    .github/scripts/backup.mjs
+$ corepack pnpm test
+  FAIL tests/backup.test.ts [ tests/backup.test.ts ]
+  SyntaxError: Invalid or unexpected token
+   -> tests/backup.test.ts:16:1
+  Test Files  1 failed | 37 passed (38)
+       Tests  317 passed (317)
+  exit 1
+```
+
+Failure shape matches issue #30 verbatim (file, error, `16:1`, 1 failed/37 passed, 317 tests). The fix therefore demonstrably changes something.
+
+**Fresh-materialization proof, run TWICE consecutively (Deliverable 3 / acceptance items 3-5).** Each cycle from a clean tree (`git status --porcelain` empty as a hard precondition), tearing the working tree down and re-deriving every tracked file from the committed objects under the new `.gitattributes`:
+
+| | cycle 1 | cycle 2 |
+|---|---|---|
+| `git rm --cached -r . -q && git reset --hard HEAD` | ok, `git status --porcelain` empty | ok, `git status --porcelain` empty |
+| `tr -dc '\r' < tests/backup.test.ts \| wc -c` | **0** | **0** |
+| `tr -dc '\r' < .github/scripts/backup.mjs \| wc -c` | **0** | (canary pair `w/lf`) |
+| `git ls-files --eol` on the canary pair | `i/lf w/lf attr/text=auto eol=lf` (both) | `i/lf w/lf attr/text=auto eol=lf` (both) |
+| `git ls-files --eol \| grep -Ec 'w/crlf\|w/mixed'` | **0** (was 140 crlf + 1 mixed) | **0** |
+| `corepack pnpm test` | **38 passed (38) files / 333 passed (333) tests, exit 0**, 13.45s | **38 passed (38) files / 333 passed (333) tests, exit 0**, 14.02s |
+
+Both cycles green with zero failures, meeting the 38/333 baseline. This is green *after* a full teardown-and-rebuild from committed objects, not merely a green authoring tree — the distinction that produced the false-greens documented in issue #30's "Why review missed it".
+
+**Binary safety (acceptance item 7).** Post-fix re-scan `git ls-files | grep -Ei '\.(png|jpg|jpeg|gif|ico|woff|woff2|ttf|eot|pdf|zip|gz|db|sqlite|wasm)$'` is still empty (grep exit 1) — this ticket introduced no binary regression. Because option (a) was chosen, the specific git mechanism relied on, per acceptance item 7's requirement to name it rather than assert safety: `text=auto` applies eol conversion only to blobs git's own content-sniffing heuristic classifies as text — a NUL byte, or a high enough proportion of non-printable bytes, within roughly the first 8000 bytes of the blob marks it binary and exempts it from *all* eol conversion (git's documented `core.autocrlf`/`text=auto` detection). Future NUL-bearing binaries (PNG/PDF/ZIP/WOFF) are exempt by construction. The known heuristic edge — UTF-16 text contains NULs and is sniffed as binary — fails *safe*: such a file is left untouched, never corrupted.
+
+**Commit shape (acceptance item 8).** `git log --oneline main..HEAD` on `ticket/ISS-30`:
+
+```
+<C> ISS-30: writeback — Changelog (rule shape, renormalize no-op, both fresh-materialization proofs)
+7132a49 ISS-30: repo-wide LF materialization rule (* text=auto eol=lf) — fixes CRLF checkout breaking vitest (#30)
+17c8408 ISS-30: commit Architect implementation plan
+```
+
+Commit A (`7132a49`) is the `.gitattributes` change alone; commit B is absent and documented as skipped-because-empty above, per acceptance item 8's escape clause; commit C is this Changelog append only. `git diff main..HEAD --stat` lists exactly `.gitattributes` (3 insertions) and `docs/plans/ISS-30.md` (the plan, committed per repo convention) before commit C adds this ticket file — no third content-bearing file, so no renormalization churn was smuggled in.
+
+**Scheduling flag repeated (Feedback obligation 3 / plan §5 Q1).** Re-verified at build time: `git branch -a` lists only `main`, `origin/main`, and 15 already-merged `ticket/*` branches — none of `LIB-01..03`, `FIT-01..03`, `TLR-01/02`, `PRP-01..04`, `PLT-03/04` has a branch, so nothing collided and no escalation was triggered. Forward-looking: this ticket should merge to `main` **before** any of those 14 cut a branch, or such a branch would carry the stale `.gitattributes` and reproduce this bug for its own new files at its own merge. Advisory for whoever sequences the next milestone batch; not a blocker (`blocked_by`/`blocks` stay empty).
