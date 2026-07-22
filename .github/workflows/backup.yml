@@ -1,0 +1,71 @@
+name: Weekly backup
+
+# PLT-02. Weekly pg_dump of the production Neon database, uploaded to Cloudflare R2
+# (PRD §8.2). `workflow_dispatch` is added so Horace can trigger one real run on
+# demand to satisfy this ticket's [human] acceptance item ("confirms one real backup
+# run succeeds end to end") without waiting for the next scheduled window — it does
+# not change the no-op contract below.
+on:
+  schedule:
+    # Sundays 03:00 UTC — low-traffic default; PRD only specifies "每周" (weekly), not
+    # a specific day/time. Adjust freely; not load-bearing for any acceptance item.
+    - cron: '0 3 * * 0'
+  workflow_dispatch: {}
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # ubuntu-latest does not ship pg_dump by default (unlike the AWS CLI, which
+      # is pre-installed) — install explicitly rather than assume. Idempotent/cheap;
+      # runs unconditionally (before the secret check below) so it never masks a
+      # "tooling missing" failure behind the no-op path.
+      #
+      # PLT-02 Reviewer bounce (client/server major-version mismatch): ubuntu-24.04's
+      # own apt repo ships postgresql-client 16, but pg_dump ABORTS ("aborting because
+      # of server version mismatch") when the SERVER major is newer than the client —
+      # and Neon's current default for new projects is Postgres 17. Installing the bare
+      # `postgresql-client` package would therefore red-fail the first real backup on a
+      # Neon 17 server. Fix: add the official PGDG apt repo and install a version-pinned
+      # client (17) that matches Neon's current default major. A pg_dump client can dump
+      # its own major and any OLDER server, so client 17 also covers 16/15/… If Horace
+      # ever provisions a NEWER Neon major (18+), bump PG_MAJOR below to match-or-exceed
+      # the server — see docs/ops/backup.md Troubleshooting ("server version mismatch").
+      - name: Install PostgreSQL client tools (pg_dump)
+        env:
+          # Match-or-exceed the Neon server major. 17 == Neon's current default.
+          PG_MAJOR: '17'
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            | sudo gpg --dearmor -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+          sudo apt-get install --yes "postgresql-client-${PG_MAJOR}"
+          pg_dump --version
+
+      # R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY / R2_BUCKET / R2_ENDPOINT are GitHub
+      # Actions REPOSITORY SECRETS (Settings > Secrets and variables > Actions),
+      # configured directly in GitHub — NOT read from .env.example or any app runtime
+      # config. See .env.example's own comment block and backup.mjs's header comment
+      # for the same note. DATABASE_URL here is a SEPARATE GitHub Actions secret from
+      # the app's Vercel env var of the same name — both must point at the same
+      # production Neon database, but each platform's secret store is configured
+      # independently; setting one does not set the other.
+      - name: Run backup
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+        run: node .github/scripts/backup.mjs
