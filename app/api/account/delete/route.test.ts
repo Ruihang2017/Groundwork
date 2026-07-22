@@ -2,7 +2,7 @@ import { PGlite } from '@electric-sql/pglite';
 import { eq, getTableName } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/pglite';
 import { migrate } from 'drizzle-orm/pglite/migrator';
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import * as schema from '@/db/schema';
 
@@ -224,15 +224,14 @@ afterEach(() => {
 // the real db/migrations chain inside it(); under full-suite load (37 files fanned
 // across one forked worker per core) the file's first test also pays the worker's
 // one-time WASM compile and has been measured at 4676ms against Vitest's 5000ms
-// default — and timed out outright in issue #29's runs. File-scoped raise only:
-// vi.resetConfig() below restores the default, so no other file's 5000ms ceiling moves.
-beforeAll(() => {
-  vi.setConfig({ testTimeout: 30_000 });
-});
-
-afterAll(() => {
-  vi.resetConfig();
-});
+// default — and timed out outright in issue #29's runs. Passed as each it()'s third
+// argument because that is the only placement Vitest actually binds: a task's timeout
+// is resolved and closed over at COLLECTION time (`options?.timeout ??
+// runner.config.testTimeout`, @vitest/runner 3.2.7), so a `vi.setConfig({ testTimeout })`
+// inside beforeAll runs after the binding and is a silent no-op. Scoped to this file
+// only — every other file keeps the 5000ms fail-fast ceiling. The last test in the
+// describe below is a guard that proves this raise is still in force.
+const PGLITE_TEST_TIMEOUT_MS = 30_000;
 
 describe('POST /api/account/delete', () => {
   it('[machine] deletes EVERY per-user row across all tables (硬删该用户全部数据)', async () => {
@@ -259,7 +258,7 @@ describe('POST /api/account/delete', () => {
       accounts: 0,
       sessions: 0,
     });
-  });
+  }, PGLITE_TEST_TIMEOUT_MS);
 
   it('[machine] leaves a SECOND user entirely untouched (no cross-user deletion)', async () => {
     const { db } = await createTestDb();
@@ -286,7 +285,7 @@ describe('POST /api/account/delete', () => {
       accounts: 1,
       sessions: 1,
     });
-  });
+  }, PGLITE_TEST_TIMEOUT_MS);
 
   it('[machine] leaves eval_runs UNCHANGED (deliberately out of scope — no userId column)', async () => {
     const { db } = await createTestDb();
@@ -308,7 +307,7 @@ describe('POST /api/account/delete', () => {
     expect(evalRows).toHaveLength(1);
     expect(evalRows[0].passRate).toBe(0.92);
     expect(evalRows[0].details).toEqual({ failures: ['case-3'] });
-  });
+  }, PGLITE_TEST_TIMEOUT_MS);
 
   it('[machine] rolls back ENTIRELY when a delete fails mid-transaction (no partial delete)', async () => {
     const { db } = await createTestDb();
@@ -331,7 +330,7 @@ describe('POST /api/account/delete', () => {
     const after = await userRowCounts(db, userId, jobId);
     expect(after).toEqual(before);
     expect(Object.values(after).every((c) => c === 1)).toBe(true);
-  });
+  }, PGLITE_TEST_TIMEOUT_MS);
 
   it('[machine] returns 401 and makes NO DB calls when unauthenticated', async () => {
     const { db } = await createTestDb();
@@ -345,7 +344,7 @@ describe('POST /api/account/delete', () => {
     await expect(res.json()).resolves.toEqual({ error: 'Unauthorized' });
     expect(txSpy).not.toHaveBeenCalled();
     expect(mockSignOut).not.toHaveBeenCalled();
-  });
+  }, PGLITE_TEST_TIMEOUT_MS);
 
   it('[machine] deletes ONLY the session user — the handler reads no userId input', async () => {
     // The handler signature is POST() — it takes no Request and cannot read a
@@ -363,7 +362,7 @@ describe('POST /api/account/delete', () => {
     const otherCounts = await userRowCounts(db, otherUser.userId, otherUser.jobId);
     expect(Object.values(sessionCounts).every((c) => c === 0)).toBe(true);
     expect(Object.values(otherCounts).every((c) => c === 1)).toBe(true);
-  });
+  }, PGLITE_TEST_TIMEOUT_MS);
 
   it('signs the user out after a successful delete (redirect:false)', async () => {
     const { db } = await createTestDb();
@@ -375,7 +374,7 @@ describe('POST /api/account/delete', () => {
     await POST();
 
     expect(mockSignOut).toHaveBeenCalledWith({ redirect: false });
-  });
+  }, PGLITE_TEST_TIMEOUT_MS);
 
   it('still reports deleted:true if signOut throws after a committed delete', async () => {
     const { db } = await createTestDb();
@@ -392,5 +391,25 @@ describe('POST /api/account/delete', () => {
     // The deletion actually happened despite the signOut failure.
     const counts = await userRowCounts(db, userId, jobId);
     expect(Object.values(counts).every((c) => c === 0)).toBe(true);
-  });
+  }, PGLITE_TEST_TIMEOUT_MS);
+
+  // ISS-29 regression guard. The first attempt at this fix raised the timeout with
+  // `vi.setConfig({ testTimeout })` inside a beforeAll — which reads correct in the
+  // diff but is a functional no-op: Vitest resolves each task's timeout at collection
+  // time, before any hook runs, so every test silently stayed at the 5000ms default
+  // and issue #29 would have recurred on the next loaded run. This test reads the
+  // timeout Vitest actually bound to each task in this file and fails if the raise
+  // ever stops taking effect (a moved/removed third argument, a new PGlite-backed
+  // test added without one, or a Vitest upgrade that changes the binding).
+  it('[machine] ISS-29 guard: every test in this file got the raised PGlite timeout bound', ({
+    task,
+  }) => {
+    const siblings = (task.suite?.tasks ?? []).filter((t) => t.type === 'test');
+    // Sanity: we really are inspecting this file's suite, not an empty list.
+    expect(siblings.length).toBeGreaterThanOrEqual(9);
+    const notRaised = siblings
+      .filter((t) => t.timeout < PGLITE_TEST_TIMEOUT_MS)
+      .map((t) => `${t.name} (${t.timeout}ms)`);
+    expect(notRaised).toEqual([]);
+  }, PGLITE_TEST_TIMEOUT_MS);
 });
