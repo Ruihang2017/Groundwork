@@ -1,3 +1,6 @@
+# ISS-30: repo-wide LF materialization — core.autocrlf=true checkouts wrote CRLF and broke vitest parsing (issue #30); text=auto content-sniffing exempts true binaries, and the catch-all self-extends to every future file type with no further edits
+* text=auto eol=lf
+
 # agent-templates: Workflow tool rejects CRLF scripts (keep LF)
 .claude/workflows/*.js text eol=lf
 .claude/scripts/*.mjs text eol=lf
