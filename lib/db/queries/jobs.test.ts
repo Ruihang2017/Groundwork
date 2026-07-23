@@ -326,6 +326,118 @@ describe('lib/db/queries/jobs — stored-row drift', () => {
   );
 });
 
+// --- FIT-03 append ------------------------------------------------------------
+
+describe('lib/db/queries/jobs — listJobs (FIT-03, plan D1)', () => {
+  it(
+    "[machine] returns ONLY the caller's rows — another user's jobs are invisible (PRD §8.3)",
+    async () => {
+      const { createJob, listJobs } = await importQueries();
+      const owner = await freshUser();
+      const other = await freshUser();
+
+      const mine = await createJob(owner, 'Acme', 'Engineer', 'jd', makeJd());
+      await createJob(other, 'Globex', 'Engineer', 'jd', makeJd());
+
+      const rows = await listJobs(owner);
+      expect(rows.map((r) => r.id)).toEqual([mine.id]);
+      // ...and the other user still sees exactly their own.
+      expect((await listJobs(other)).map((r) => r.company)).toEqual(['Globex']);
+    },
+    PGLITE_TEST_TIMEOUT_MS,
+  );
+
+  it(
+    '[machine] orders by createdAt DESC (newest first), NOT by updatedAt',
+    async () => {
+      const { createJob, listJobs, updateJobStatus } = await importQueries();
+      const userId = await freshUser();
+
+      // `createdAt` is set explicitly rather than relying on insertion order:
+      // $defaultFn timestamps are Date.now() at ms resolution and three inserts in
+      // one test can collide, which would make the assertion pass or fail by luck.
+      const oldest = await createJob(userId, 'Oldest', 'Engineer', 'jd', makeJd());
+      const middle = await createJob(userId, 'Middle', 'Engineer', 'jd', makeJd());
+      const newest = await createJob(userId, 'Newest', 'Engineer', 'jd', makeJd());
+      await db.update(schema.jobs).set({ createdAt: 1_000 }).where(eq(schema.jobs.id, oldest.id));
+      await db.update(schema.jobs).set({ createdAt: 2_000 }).where(eq(schema.jobs.id, middle.id));
+      await db.update(schema.jobs).set({ createdAt: 3_000 }).where(eq(schema.jobs.id, newest.id));
+
+      expect((await listJobs(userId)).map((r) => r.company)).toEqual([
+        'Newest',
+        'Middle',
+        'Oldest',
+      ]);
+
+      // Touching the OLDEST job's status bumps its updatedAt to "now" — if the
+      // ordering key were updatedAt it would jump to the top. It must not.
+      await clockGap();
+      await updateJobStatus(userId, oldest.id, 'applied');
+      expect((await listJobs(userId)).map((r) => r.company)).toEqual([
+        'Newest',
+        'Middle',
+        'Oldest',
+      ]);
+    },
+    PGLITE_TEST_TIMEOUT_MS,
+  );
+
+  it(
+    '[machine] returns [] for a user with no jobs',
+    async () => {
+      const { listJobs } = await importQueries();
+      expect(await listJobs(await freshUser())).toEqual([]);
+    },
+    PGLITE_TEST_TIMEOUT_MS,
+  );
+
+  it(
+    '[machine] returns EXACTLY the five JobListRow keys — no jdRaw/jd/ledger/fit (plan D1)',
+    async () => {
+      // THIS is the test that keeps D1 true against a future "just select *" edit:
+      // the narrow projection is a privacy and blast-radius decision, and a widened
+      // select would silently undo it with no other visible symptom.
+      const { createJob, listJobs } = await importQueries();
+      const userId = await freshUser();
+      await createJob(userId, 'Acme', 'Engineer', 'SECRET JD TEXT', makeJd());
+
+      const [row] = await listJobs(userId);
+      expect(Object.keys(row).sort()).toEqual([
+        'company',
+        'createdAt',
+        'id',
+        'role',
+        'status',
+      ]);
+      const widened = row as Record<string, unknown>;
+      expect(widened.jdRaw).toBeUndefined();
+      expect(widened.jd).toBeUndefined();
+      expect(widened.ledger).toBeUndefined();
+      expect(widened.fit).toBeUndefined();
+      expect(JSON.stringify(row)).not.toContain('SECRET JD TEXT');
+    },
+    PGLITE_TEST_TIMEOUT_MS,
+  );
+
+  it(
+    '[machine] includes a FIT-LESS job — the transient post-FIT-01/pre-FIT-02 row must be listed',
+    async () => {
+      // A narrow projection cannot see `fit`, so this is really a statement about
+      // what the list must NOT do: filter to "complete" jobs. The user has already
+      // paid a `fit` quota unit for this row; hiding it would hide their money.
+      const { createJob, listJobs } = await importQueries();
+      const userId = await freshUser();
+      const created = await createJob(userId, 'Acme', 'Engineer', 'jd', makeJd());
+      expect(created.fit).toBeNull();
+
+      const rows = await listJobs(userId);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ id: created.id, status: 'screening' });
+    },
+    PGLITE_TEST_TIMEOUT_MS,
+  );
+});
+
 describe('lib/db/queries/jobs — module safety', () => {
   // BUILD GUARD. FIT-03's server components import this module DIRECTLY, and
   // `next build`'s "Collecting page data" phase imports every page module — while
