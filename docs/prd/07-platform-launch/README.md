@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| 版本 | v0.3 |
+| 版本 | v0.5 |
 | 日期 | 2026-07-17 |
 | 上游 | [docs/PRD.md](../../PRD.md) §3 C5, §8.3, §8.4, §9, §10 P5 |
 | 状态 | Draft → Gate 1 评审 |
@@ -82,3 +82,10 @@ PRD §3 C5（上线基线）："注册登录、用量配额、隐私政策与删
   - **[major] 上传无 region 必失败**：`aws s3 cp` 未设 region，GitHub runner 无环境/配置 region，AWS CLI v2 硬失败（"You must specify a region"）——首次真实运行必然在上传步骤失败，`[human]` 端到端验收无法通过。修复：上传子进程注入 `AWS_DEFAULT_REGION=auto`（Cloudflare R2 规定值）。
   - **[minor] pg_dump 客户端/服务端主版本不匹配**：ubuntu-24.04 stock `postgresql-client` 为 v16，而 Neon 新项目默认 Postgres 17，服务端主版本更新时 `pg_dump` 直接 abort。改为加装官方 PGDG apt 源并按 `PG_MAJOR`（默认 17）安装版本对齐的 client；`docs/ops/backup.md` Troubleshooting 补该失败模式与「按 Neon 主版本 bump `PG_MAJOR`」的指引。
   - **[blocker] 评审工件完整性**：上述 finding 1–2 的修复原仅存在于工作树、未落 commit，CLEAR 合并会漏掉修复。本次将全部修复 + changelog 回写落入 commit，使 diff 自身即含修复。
+- v0.5（2026-07-23，PLT-03 Builder writeback）：PLT-03（`/admin` 可观测页）Deliverables 1–3 实现完成。全套测试 **471 通过 / 2 skipped（46 文件）**，其中新增 69 项；`pnpm lint` clean；**完全无 env var** 的 `next build` exit 0，`/admin` 标记为 `ƒ (Dynamic)`。新增 `lib/db/queries/admin.ts`（`getWeeklyCost` / `getLatencyPercentiles` / `getDroppedRate` / `getFunnelConversion`，全部只读、只返回标量与比值）、`app/(admin)/admin/page.tsx` + `_components/observability-dashboard.tsx`、`app/(admin)/_lib/admin-emails.ts`，并向 `middleware.ts`、`.env.example` 追加（append-only）。要点（完整 deviations 见 `tickets/PLT-03-admin-observability.md` 的 Changelog v0.1）：
+  - **开放问题 #1（`/admin` 管理员鉴权机制）仍然开放**——本票据按拆解决策实现 env var 邮箱白名单（`ADMIN_EMAILS`，大小写/空白不敏感，未配置即 fail-closed，无人可进），但这不构成 Horace 的确认。若改为 `users.isAdmin` 列或硬编码单账号，只需改 `app/(admin)/_lib/admin-emails.ts` 与 `middleware.ts` 的一个分支。未写 ADR：`docs/adr/` 目前为空，为一个尚待 owner 确认的决策建 ADR 会误表其状态。
+  - **双层门禁，状态码有意不同**：middleware 对已登录非白名单用户返回 **403**（严格排在既有 `!req.auth` → `/signin` 重定向之后，未登录访问 `/admin` 行为完全不变）；页面在**任何查询之前**用 `notFound()`（404）再挡一次。后者非冗余——`config.matcher` 排除 `/api/**`，未来的 admin API 路由不会继承 middleware 门禁。路径匹配为 **segment-scoped**，`/administrators` 不被误伤（FND-08 Reviewer finding #3 同类 bug，已加回归测试）。
+  - **`lib/db/queries/admin.ts` 是 PRD §8.3「全部查询以 session userId 约束」的唯一有意例外**，因此以结构而非约定收敛：任何导出函数都不接受 `userId`（测试断言 arity）、返回值只有标量/比值、渲染页面不含任何 email 或 UUID 形状字符串（正则断言）、并有测试遍历 `app/**` + `lib/**` 断言该模块只被 `app/(admin)/admin/page.tsx` 一个运行时文件导入。
+  - **dropped 数值不是 PRD 的 dropped 率**：票据字面公式 `SUM(droppedCount)/COUNT(*)` 是「每次操作的平均 dropped 条数」，而 §6/§7 的 `dropped < 15%` 门槛除以候选条目总数——`usage_events` 无此列，故页面明确标注为 "Dropped items per operation (7d avg)" 并写明不可与 15% 门槛对比。真正的比率需扩列（票据 Feedback obligation #3），属后续票据。
+  - **窗口不对称是有意的**：成本/延迟/dropped 为滚动 7 天，漏斗转化为 all-time（票据定义本身不含窗口），页面两处都显式标注周期；`interviewingToBrief` 为「当前 interviewing 群体」的时点快照（`jobs.status` 是状态非历史），已在页面标注，读数偏低属产品信号而非本票据缺陷。
+  - **仍不可离线验证**（沿袭 FND-05/FND-08 的既有基础设施开放问题，非本票据引入）：Edge 运行时是否在构建期内联 `ADMIN_EMAILS`（故 `.env.example` 注明改值后需 redeploy），以及 middleware 中 `auth()` 的 database session 策略在 Edge 是否可用。两者均 fail-closed。
