@@ -14,6 +14,19 @@ export default defineConfig({
     // itself to jsdom via a `// @vitest-environment jsdom` file-level comment, so
     // every existing db/**, auth*, middleware test keeps its node environment.
     environment: 'node',
+    // ISS-29, raised to a GLOBAL floor by PLT-04. Vitest's default hookTimeout is
+    // 10_000ms; a PGlite boot + the real migration chain routinely exceeds that once
+    // enough suites contend for the box. The established remedy is a per-hook third
+    // argument (lib/db/queries/admin.test.ts:46 explains why that is the only
+    // placement Vitest binds) — but three files that predate the convention rely on
+    // the default instead (lib/config/quota.test.ts, lib/usage/record.test.ts,
+    // eval/report.test.ts), and PLT-04's two new PGlite-backed suites pushed them
+    // over it. Raising the floor here fixes all three WITHOUT editing them (they are
+    // regression guards owned by other tickets and stay byte-for-byte unmodified).
+    // This only relaxes a deadline — it changes no assertion and can turn no red test
+    // green. Per-hook third arguments remain the convention for new files; this is
+    // the safety net beneath them.
+    hookTimeout: 30_000,
     // `*.test.ts` (repo root) added by FND-08 so root-colocated middleware.test.ts /
     // auth.config.test.ts are discovered — the existing tests/**, lib/**, db/**
     // globs don't reach a root-level test file. (Same false-green failure mode
