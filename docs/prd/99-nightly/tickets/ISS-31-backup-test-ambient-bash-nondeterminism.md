@@ -148,3 +148,86 @@ No `[human]` criteria — this is a self-contained test-infrastructure fix; the 
 2. If the chosen mechanism requires modifying `.github/scripts/backup.mjs` in a way that is not a strict additive default-preserving change (i.e. the real CI command would change even slightly), stop before committing — that would touch production backup behavior PLT-02's Reviewer already validated, which is out of this ticket's authority to alter silently. Escalate for a human/Architect decision.
 3. `ticket/PLT-03` (issue #27) has complete, green, unreviewed work blocked only by this exact bug (Background). Once this ticket lands with `corepack pnpm test` confirmed green under both a normal and a forced-broken-bash PATH, `ticket/PLT-03` needs to be re-run through `run-milestone` so it can reach the Reviewer — that re-run and re-verification is the milestone runner's/`/verify-delivery`'s job, not this ticket's, but record the dependency here so it is not lost.
 4. If a repo-wide pattern of other tests invoking ambient external binaries turns up during investigation (Non-goals notes `tests/deploy-vercel.test.ts` was checked and found not to have a live equivalent bug), record it as a candidate follow-up issue rather than silently widening this ticket's scope.
+
+## Changelog
+
+### v0.1 (2026-07-23, Builder)
+
+Implemented per `docs/plans/ISS-31.md`. Mechanism: **direction (1)** — an injected fake runner, as parameter-level dependency injection on `runBackup()` — with **direction (3)** as a documented supplement and direction (2)'s env-var variant **rejected on security grounds** (`backup.mjs` runs in a job holding `DATABASE_URL` and the R2 secret key; an env-driven "which binary do I exec" switch would be a code-execution lever on a credential-bearing process, whereas a parameter default is unreachable from the environment). Full justification: plan §2.2.
+
+`.github/scripts/backup.mjs` is additive-only: one comment block, `runBackup()` → `runBackup(deps = {})`, two `const` lines (`deps.exec ?? execFileSync`, `deps.stat ?? statSync`), and three call expressions renamed. `dumpCommand()` and `uploadCommand()` are untouched; **no new `process.env` read** was added.
+
+**Guarantee → assertion mapping** (Deliverable 2):
+
+| Guarantee | Always-running proof (no bash needed) | Supplementary proof (real bash / every CI run) |
+|---|---|---|
+| **A** — a `pg_dump` failure propagates: run exits non-zero, `backup uploaded` never printed | **N1** `aborts the whole run — and never uploads — when the dump exits non-zero (pipefail propagation)` — rethrows, upload never attempted, and positively asserts the failing call was `exec('bash', ['-c', <contains "set -o pipefail">], …)` called exactly once, plus the untouched `dump command wiring` tests | the original `…when pg_dump fails…` test, unchanged — proves a real bash honours `pipefail`, that the script string is valid bash, and that the CLI wrapper turns the throw into a non-zero **process** exit |
+| **B** — an empty dump is rejected: run exits non-zero, `backup uploaded` never printed, message contains `empty backup` | **N2** (`empty backup` + `refusing to upload`, upload never attempted, guard fed a name matching `/^backup-\d{8}\.sql\.gz$/`), **N3** (exclusive bound at `MIN_BACKUP_BYTES`), and the `MIN_BACKUP_BYTES` bound test **moved** into the unconditional block | the original `…empty dump (size guard)…` test, unchanged — proves the message reaches **stderr** of a real non-zero process |
+| **Production untouched** | the two `dump command wiring` tests pass **byte-identical** (verified by diffing the block); `dumpCommand()` not edited | — |
+
+Also added: **N4** (first test in the repo to reach the upload branch — asserts `aws s3 cp` and `backup uploaded`) and **N5** (`DATABASE_URL` reaches the dump child through `env` only, never argv — lifts PLT-02's argv-avoidance property to the actual call site).
+
+**Skip reconciliation** (acceptance item 5) — `grep -n "\.skip(\|\.todo(\|runIf\|skipIf" tests/backup.test.ts` returns exactly one line:
+
+    353:describe.runIf(BASH_CAN_RUN_THE_DUMP_PIPELINE)('.github/scripts/backup.mjs — fail-closed dump, REAL bash end-to-end (Reviewer bounce: silent corruption; ISS-31 supplement)', () => {
+
+**No `.skip(` or `.todo(` was introduced** — zero matches. The single conditional-execution site is the `describe.runIf` above, and per the table every guarantee it gates is *also* asserted by a test that always runs. It executes unconditionally on CI (`.github/workflows/ci.yml` runs the suite on `ubuntu-latest`), so coverage strictly increases relative to before.
+
+**Forced-broken-bash proof** (acceptance item 2). Construction — a **zero-byte file named `bash.exe`**, placed outside the repo and prepended to `PATH`; Windows `CreateProcess` then fails on it deterministically:
+
+    FAKEBIN=/c/Users/HoraceHou/AppData/Local/Temp/iss31-fakebin
+    mkdir -p "$FAKEBIN" && : > "$FAKEBIN/bash.exe"
+    PATH="$FAKEBIN:$PATH" corepack pnpm test
+
+Mandatory pre-check (proves the shim really won the lookup, so the post-fix green is not vacuous) — `spawnSync('bash', ['-c','echo hi'])` under that PATH printed **`status= null err= UNKNOWN`**, observed before every broken-PATH run.
+
+*Pre-fix* (at `0c82680`) — the red reproduced, same shape as issue #31's WSL symptom (1 failed, everything else passing):
+
+    → expected 'spawnSync bash UNKNOWN\n' to contain 'empty backup'
+    FAIL tests/backup.test.ts > .github/scripts/backup.mjs — fail-closed dump (Reviewer bounce: silent corruption) > exits non-zero and does NOT upload when pg_dump succeeds but produces an empty dump (size guard)
+    AssertionError: expected 'spawnSync bash UNKNOWN\n' to contain 'empty backup'
+     ❯ tests/backup.test.ts:233:33
+     Test Files  1 failed | 41 passed (42)
+          Tests  1 failed | 398 passed (399)
+
+*Post-fix*, same broken PATH — fully green, exactly the two end-to-end tests skipped:
+
+    ✓ tests/backup.test.ts (21 tests | 2 skipped) 735ms
+     Test Files  42 passed (42)
+          Tests  402 passed | 2 skipped (404)
+
+**Results matrix** (acceptance items 1, 2, 8 — twice in a row each):
+
+| PATH | Run 1 | Run 2 |
+|---|---|---|
+| normal (Git Bash first) | `42 passed (42)` files / `404 passed (404)` tests, **nothing skipped** | identical |
+| forced-broken `bash.exe` | `42 passed (42)` files / `402 passed, 2 skipped (404)` tests | identical |
+
+Baseline before any edit was `42 passed (42)` / `399 passed (399)`. 399 → 404 is the five new in-process tests (the `MIN_BACKUP_BYTES` test moved rather than being added).
+
+**Production-unchanged proof** (acceptance item 6) — `dumpCommand('backup-20260719.sql.gz')` with no env/parameter override:
+
+    command   : "bash"
+    args      : ["-c","set -o pipefail; pg_dump \"$DATABASE_URL\" | gzip > \"$BACKUP_FILE\""]
+    pipefail  : true
+    pipeline  : true      (matches /pg_dump\s+"\$DATABASE_URL"\s*\|\s*gzip\s*>\s*"\$BACKUP_FILE"/)
+    exact     : true      (byte-identical to the pre-change string)
+    arity     : 0         (optional param — the CLI wrapper still calls runBackup())
+
+**Type check**: `npx tsc --noEmit` — 8 errors before, 8 after; the semantic set (file + TS code + offending identifier) is **identical**, i.e. zero new type errors. The repo's `tsc` was already red before this ticket (1 pre-existing error in `app/api/account/delete/route.test.ts`, 7 in `tests/backup.test.ts`'s untouched blocks). The plan's `deps = {}` signature form was required for this — the destructured-parameter form adds `TS2322` at every test call site.
+
+**Mutation checks** (Builder diligence — evidence the new tests bite, not merely that they pass). Each mutation was applied to `backup.mjs`, the suite run, then reverted:
+
+| Mutation | Result |
+|---|---|
+| size guard disabled (`if (false)`) | **3 failed** (N2, N3, real-bash size-guard test) |
+| dump error swallowed in `try/catch` | **1 failed — N1 only** |
+| production `command: 'bash'` → `'sh'` | **3 failed** (wiring test + N1 + …) |
+
+The middle row is the important one and confirms plan §4.1's review-critical finding: with the dump error swallowed, the *real-bash* Guarantee A test **still passed** (the size guard caught the run instead), so only N1's positive "the failing call was the pipefail'd bash dump, called exactly once" assertion detected the regression. That is exactly the vacuous-pass trap the plan warned about.
+
+**Hygiene**: `corepack pnpm lint` clean; `git status --porcelain` empty after every full suite run; no `backup-*.sql.gz` anywhere (the injected `stat` makes one impossible — that path is not gitignored).
+
+**Downstream dependency (record, do not act — Feedback obligation #3):** `ticket/PLT-03` (issue #27) carries complete, green, unreviewed work blocked at the Builder gate by exactly this bug. Now that the suite is green independent of ambient `bash` resolution, `ticket/PLT-03` needs re-running through `run-milestone` so it can reach the Reviewer. That re-run belongs to the milestone runner / `/verify-delivery`, not this ticket.
+
+**Follow-up candidates (recorded, not fixed here — Feedback obligation #4):** no second instance of the ambient-PATH-binary pattern was found. Under the forced-broken-bash PATH, 41 of 42 test files passed pre-fix, so no other file depends on `bash`; `tests/deploy-vercel.test.ts`'s `execFileSync('npx', …)` path stays unreachable under test (its `VERCEL_TOKEN` guard short-circuits first). Plan §5.1's open question — whether "no test may depend on an ambient PATH binary" should become a written repo convention with a mechanical check — remains open for Horace / the next testing-conventions review.
