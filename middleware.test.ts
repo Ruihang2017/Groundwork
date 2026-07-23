@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Mock @/auth so `auth(handler)` is a pass-through that hands back the inner
 // request handler unchanged — this lets the test capture and invoke the handler
@@ -107,5 +107,117 @@ describe('middleware — request handling (acceptance item 3)', () => {
     const res = runMiddleware(fakeReq('/tos', null)) as Response;
     expect(isRedirect(res)).toBe(false);
     expect(res.headers.get('x-middleware-next')).toBe('1');
+  });
+});
+
+// PLT-03 — the /admin AUTHORIZATION gate (ticket acceptance item 4), appended
+// without touching anything above. No vi.resetModules() anywhere here on
+// purpose: app/(admin)/_lib/admin-emails.ts reads process.env.ADMIN_EMAILS at
+// CALL time. If a future edit moves that read to module scope, these tests start
+// asserting against a stale snapshot — the fix is that module, not a resetModules
+// here.
+describe('middleware — /admin authorization gate (PLT-03, acceptance item 4)', () => {
+  const ORIGINAL_ADMIN_EMAILS = process.env.ADMIN_EMAILS;
+
+  beforeEach(() => {
+    process.env.ADMIN_EMAILS = 'admin@example.com';
+  });
+
+  afterEach(() => {
+    if (ORIGINAL_ADMIN_EMAILS === undefined) delete process.env.ADMIN_EMAILS;
+    else process.env.ADMIN_EMAILS = ORIGINAL_ADMIN_EMAILS;
+  });
+
+  it('REJECTS /admin with 403 for an authenticated session whose email is NOT allowlisted (item 4a)', () => {
+    const res = runMiddleware(
+      fakeReq('/admin', { user: { id: 'u1', email: 'nobody@example.com' } }),
+    ) as Response;
+    expect(res.status).toBe(403);
+    expect(isRedirect(res)).toBe(false);
+  });
+
+  it('ALLOWS /admin for an allowlisted email (item 4b)', () => {
+    const res = runMiddleware(
+      fakeReq('/admin', { user: { id: 'u1', email: 'admin@example.com' } }),
+    ) as Response;
+    expect(isRedirect(res)).toBe(false);
+    expect(res.status).not.toBe(403);
+    expect(res.headers.get('x-middleware-next')).toBe('1');
+  });
+
+  it('ALLOWS an allowlisted email differing in case and surrounded by whitespace', () => {
+    const res = runMiddleware(
+      fakeReq('/admin', { user: { id: 'u1', email: ' ADMIN@Example.com ' } }),
+    ) as Response;
+    expect(res.headers.get('x-middleware-next')).toBe('1');
+  });
+
+  it('REJECTS an authenticated session carrying NO email', () => {
+    expect((runMiddleware(fakeReq('/admin', { user: { id: 'u1' } })) as Response).status).toBe(
+      403,
+    );
+    expect((runMiddleware(fakeReq('/admin', {})) as Response).status).toBe(403);
+  });
+
+  it('FAILS CLOSED when ADMIN_EMAILS is unset or blank — nobody reaches /admin', () => {
+    delete process.env.ADMIN_EMAILS;
+    expect(
+      (runMiddleware(fakeReq('/admin', { user: { email: 'admin@example.com' } })) as Response)
+        .status,
+    ).toBe(403);
+
+    process.env.ADMIN_EMAILS = '  ,  ';
+    expect(
+      (runMiddleware(fakeReq('/admin', { user: { email: 'admin@example.com' } })) as Response)
+        .status,
+    ).toBe(403);
+  });
+
+  it('redirects an UNAUTHENTICATED /admin request to /signin — NOT a 403 (ordering guard)', () => {
+    // Authentication first, authorization second. A 403 here would leak "this
+    // path exists and you are not signed in" instead of the normal sign-in flow.
+    const res = runMiddleware(fakeReq('/admin', null)) as Response;
+    expect(isRedirect(res)).toBe(true);
+    expect(res.headers.get('location')).toMatch(/\/signin$/);
+    expect(res.status).not.toBe(403);
+  });
+
+  it('gates nested /admin/** paths too', () => {
+    expect(
+      (runMiddleware(fakeReq('/admin/usage', { user: { email: 'nobody@example.com' } })) as Response)
+        .status,
+    ).toBe(403);
+    expect(
+      (runMiddleware(fakeReq('/admin/a/b', { user: { email: 'nobody@example.com' } })) as Response)
+        .status,
+    ).toBe(403);
+    expect(
+      (runMiddleware(fakeReq('/admin/usage', { user: { email: 'admin@example.com' } })) as Response)
+        .headers.get('x-middleware-next'),
+    ).toBe('1');
+  });
+
+  it('does NOT admin-gate a path that merely STARTS WITH "/admin" (segment-scoped, FND-08 finding #3 class)', () => {
+    // A bare startsWith('/admin') would 403 these for every non-admin user. They
+    // are ordinary authenticated pages and must pass through untouched.
+    for (const path of ['/administrators', '/admin-guide', '/adminx']) {
+      const res = runMiddleware(fakeReq(path, { user: { email: 'nobody@example.com' } })) as Response;
+      expect(res.status, path).not.toBe(403);
+      expect(res.headers.get('x-middleware-next'), path).toBe('1');
+    }
+  });
+
+  it('leaves non-admin protected paths unaffected by the allowlist', () => {
+    const res = runMiddleware(
+      fakeReq('/jobs', { user: { id: 'u1', email: 'nobody@example.com' } }),
+    ) as Response;
+    expect(res.status).not.toBe(403);
+    expect(res.headers.get('x-middleware-next')).toBe('1');
+  });
+
+  it('keeps /admin matched by config.matcher (the gate is only reachable if middleware runs at all)', () => {
+    const re = new RegExp(`^${(config.matcher as string[])[0]}$`);
+    expect(re.test('/admin')).toBe(true);
+    expect(re.test('/admin/usage')).toBe(true);
   });
 });
