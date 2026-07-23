@@ -4,6 +4,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { spawnSync } from 'node:child_process';
@@ -11,12 +12,13 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   MIN_BACKUP_BYTES,
   backupFileName,
   dumpCommand,
+  runBackup,
   uploadCommand,
 } from '../.github/scripts/backup.mjs';
 
@@ -175,13 +177,180 @@ describe('.github/scripts/backup.mjs — backupFileName', () => {
   });
 });
 
+// ISS-31 (issue #31): the ALWAYS-RUNNING proof of both fail-closed guarantees.
+// `exec`/`stat` are injected stand-ins for execFileSync/statSync, so these tests spawn
+// no child process, perform no PATH lookup and touch no filesystem — the outcome
+// cannot depend on which `bash` wins a local PATH race, and no backup-*.sql.gz (which
+// is NOT gitignored) can ever land in the repo root. The real-bash end-to-end tests
+// further below remain as a supplement wherever a usable bash exists.
+describe('.github/scripts/backup.mjs — fail-closed dump logic (ISS-31: PATH-independent)', () => {
+  const DSN = 'postgres://user:pw@example-not-real/db';
+  const logged: string[] = [];
+
+  beforeEach(() => {
+    vi.stubEnv('DATABASE_URL', DSN);
+    vi.stubEnv('R2_ACCESS_KEY_ID', 'AKIDEXAMPLE');
+    vi.stubEnv('R2_SECRET_ACCESS_KEY', 'super-secret-value');
+    vi.stubEnv('R2_BUCKET', 'my-bucket');
+    vi.stubEnv('R2_ENDPOINT', 'https://acct.r2.cloudflarestorage.com');
+    logged.length = 0;
+    vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
+      logged.push(args.map(String).join(' '));
+    });
+  });
+
+  afterEach(() => {
+    // vitest.config.ts sets neither `unstubEnvs` nor `restoreMocks`, so both cleanups
+    // must be explicit — otherwise the stubbed R2 vars leak into the sibling no-op
+    // guard tests, which build their child env from { ...process.env }.
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  // Guarantee A — a pg_dump failure propagates and nothing is uploaded.
+  it('aborts the whole run — and never uploads — when the dump exits non-zero (pipefail propagation)', () => {
+    const exec = vi.fn().mockImplementationOnce(() => {
+      throw Object.assign(
+        new Error(
+          'Command failed: bash -c set -o pipefail; pg_dump "$DATABASE_URL" | gzip > "$BACKUP_FILE"',
+        ),
+        { status: 2 },
+      );
+    });
+    const stat = vi.fn();
+
+    expect(() => runBackup({ exec, stat })).toThrow('Command failed');
+
+    // The call that failed must be positively identified as the pipefail'd dump.
+    // Merely asserting "the run failed" is what let the OLD test pass vacuously when
+    // `bash` could not be spawned at all (spawn failure also yields a non-zero exit).
+    expect(exec).toHaveBeenCalledTimes(1);
+    expect(exec.mock.calls[0][0]).toBe('bash');
+    expect(exec.mock.calls[0][1][0]).toBe('-c');
+    expect(exec.mock.calls[0][1][1]).toContain('set -o pipefail');
+    // The size guard and the upload are both downstream of the dump: neither ran.
+    expect(stat).not.toHaveBeenCalled();
+    expect(logged.join('\n')).not.toContain('backup uploaded');
+  });
+
+  // Guarantee B — an empty archive is rejected before upload.
+  it('aborts with an `empty backup` error — and never uploads — when the dump exits 0 but writes a near-empty archive', () => {
+    const exec = vi.fn();
+    const stat = vi.fn().mockReturnValue({ size: 20 }); // gzip of empty input
+
+    expect(() => runBackup({ exec, stat })).toThrow(/empty backup/);
+    expect(() => runBackup({ exec, stat })).toThrow(/refusing to upload/);
+
+    // Dump ran, upload did not (one exec per runBackup call, two calls above).
+    expect(exec).toHaveBeenCalledTimes(2);
+    expect(exec.mock.calls.every((call) => call[0] === 'bash')).toBe(true);
+    // Regex, never a locally recomputed name: backupFileName() reads new Date()
+    // inside runBackup(), so an equality check would flake at the UTC midnight edge.
+    expect(stat.mock.calls[0][0]).toMatch(/^backup-\d{8}\.sql\.gz$/);
+    expect(logged.join('\n')).not.toContain('backup uploaded');
+  });
+
+  it('applies the size guard exclusively at MIN_BACKUP_BYTES', () => {
+    const below = vi.fn();
+    expect(() =>
+      runBackup({ exec: below, stat: () => ({ size: MIN_BACKUP_BYTES - 1 }) }),
+    ).toThrow(/empty backup/);
+    expect(below).toHaveBeenCalledTimes(1); // dump only — no upload
+
+    const atBound = vi.fn();
+    expect(() =>
+      runBackup({ exec: atBound, stat: () => ({ size: MIN_BACKUP_BYTES }) }),
+    ).not.toThrow();
+    expect(atBound).toHaveBeenCalledTimes(2); // dump + upload
+  });
+
+  it('uploads and reports success when the dump produces a real archive', () => {
+    const exec = vi.fn();
+    const stat = vi.fn().mockReturnValue({ size: 4096 });
+
+    expect(runBackup({ exec, stat })).toBe(0);
+
+    expect(exec).toHaveBeenCalledTimes(2);
+    expect(exec.mock.calls[1][0]).toBe('aws');
+    expect(exec.mock.calls[1][1].slice(0, 2)).toEqual(['s3', 'cp']);
+    expect(logged.join('\n')).toContain('backup uploaded');
+  });
+
+  it('passes DATABASE_URL to the dump child through env only, never through argv', () => {
+    const exec = vi.fn();
+    const stat = vi.fn().mockReturnValue({ size: 4096 });
+
+    runBackup({ exec, stat });
+
+    const [, args, options] = exec.mock.calls[0];
+    expect(options.env.DATABASE_URL).toBe(DSN);
+    expect(options.stdio).toBe('inherit');
+    // The connection string must never appear as an argv token (process listings).
+    expect(JSON.stringify(args)).not.toContain('postgres://');
+  });
+
+  it('MIN_BACKUP_BYTES is a small positive bound above an empty gzip (20 bytes)', () => {
+    // Documents the guard's intent: reject the ~20-byte empty-input gzip while never
+    // false-failing a real dump (even an empty DB gzips to > 100 bytes).
+    // ISS-31: moved here out of the real-bash block below, which is now conditional —
+    // this assertion has nothing to do with bash and must keep running unconditionally.
+    expect(MIN_BACKUP_BYTES).toBeGreaterThan(20);
+    expect(MIN_BACKUP_BYTES).toBeLessThan(100);
+  });
+});
+
+// ISS-31: does the ambient `bash` actually support everything the end-to-end tests
+// below need? This rehearses the whole capability set — bash runs at all; `set -o
+// pipefail` is supported; a Windows-style PATH entry is honoured; a shebang script
+// found on that PATH executes; gzip exists; a cwd-relative redirect inside an
+// os.tmpdir() workdir works. Any failure (absent bash, WSL that cannot translate
+// C:\Users\…\Temp paths, a non-shell binary that happens to be named bash) => false
+// => the block below is SKIPPED, never red. It never throws: spawnSync reports a
+// missing/unspawnable binary via r.error, and the whole body is try/catch/finally.
+function bashCanRunTheDumpPipeline(): boolean {
+  let dir: string | undefined;
+  try {
+    dir = mkdtempSync(path.join(os.tmpdir(), 'iss31-bashprobe-'));
+    const binDir = path.join(dir, 'bin');
+    mkdirSync(binDir);
+    const src = path.join(binDir, 'iss31_probe_src');
+    writeFileSync(src, '#!/bin/bash\nprintf "iss31 probe payload\\n"\n');
+    chmodSync(src, 0o755);
+    const env: NodeJS.ProcessEnv = { ...process.env, PROBE_OUT: 'probe.gz' };
+    const pathKey = Object.keys(env).find((k) => k.toLowerCase() === 'path') ?? 'PATH';
+    env[pathKey] = binDir + path.delimiter + (env[pathKey] ?? '');
+    const r = spawnSync(
+      'bash',
+      ['-c', 'set -o pipefail; iss31_probe_src | gzip > "$PROBE_OUT"'],
+      { cwd: dir, env, encoding: 'utf8', timeout: 15_000 },
+    );
+    if (r.status !== 0) return false;
+    return statSync(path.join(dir, 'probe.gz')).size > 20;
+  } catch {
+    return false;
+  } finally {
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+const BASH_CAN_RUN_THE_DUMP_PIPELINE = bashCanRunTheDumpPipeline();
+
 // Integration tests that exercise the REAL dump path (the branch the two Reviewer
 // findings live in) by putting a fake `pg_dump` on PATH. The dump runs via `bash`,
 // which honours PATH + shebang on both the ubuntu-latest runner and local MSYS/Git
 // bash, so no live Postgres/R2 is needed. The upload (`aws`) step is never reached in
 // either case because the run fails-closed first — so the real aws binary is not
 // invoked and no network access occurs.
-describe('.github/scripts/backup.mjs — fail-closed dump (Reviewer bounce: silent corruption)', () => {
+//
+// ISS-31: this block is now gated on bashCanRunTheDumpPipeline() above. It is a
+// SUPPLEMENT — it proves things no in-process test can (that a real bash honours
+// `pipefail`, that the command string is valid bash, and that the CLI wrapper turns
+// the throw into a non-zero PROCESS exit with the message on stderr) — and it runs on
+// every CI run (.github/workflows/ci.yml runs the suite on ubuntu-latest, where bash
+// is guaranteed). Both guarantees it covers are ALSO asserted unconditionally by the
+// "fail-closed dump logic (ISS-31: PATH-independent)" block above, so where no usable
+// bash exists this block skips without deleting any coverage.
+describe.runIf(BASH_CAN_RUN_THE_DUMP_PIPELINE)('.github/scripts/backup.mjs — fail-closed dump, REAL bash end-to-end (Reviewer bounce: silent corruption; ISS-31 supplement)', () => {
   function runWithFakePgDump(fakeScriptBody: string) {
     const workdir = mkdtempSync(path.join(os.tmpdir(), 'plt02-backup-'));
     try {
@@ -231,12 +400,5 @@ describe('.github/scripts/backup.mjs — fail-closed dump (Reviewer bounce: sile
     expect(result.status).not.toBe(0);
     expect(result.stdout ?? '').not.toContain('backup uploaded');
     expect(result.stderr ?? '').toContain('empty backup');
-  });
-
-  it('MIN_BACKUP_BYTES is a small positive bound above an empty gzip (20 bytes)', () => {
-    // Documents the guard's intent: reject the ~20-byte empty-input gzip while never
-    // false-failing a real dump (even an empty DB gzips to > 100 bytes).
-    expect(MIN_BACKUP_BYTES).toBeGreaterThan(20);
-    expect(MIN_BACKUP_BYTES).toBeLessThan(100);
   });
 });
