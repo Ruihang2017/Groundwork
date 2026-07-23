@@ -1,8 +1,13 @@
 import { notFound } from 'next/navigation';
 
+import BriefGenerator from '@/app/(app)/jobs/[id]/prep/_components/brief-generator';
+import BriefView from '@/app/(app)/jobs/[id]/prep/_components/brief-view';
 import LockScreen from '@/app/(app)/jobs/[id]/prep/_components/lock-screen';
+import { projectNameMap } from '@/app/(app)/jobs/[id]/prep/_lib/project-names';
 import { requireUserId } from '@/lib/auth/session';
+import { getBrief } from '@/lib/db/queries/briefs';
 import { getJob } from '@/lib/db/queries/jobs';
+import { getLibrary } from '@/lib/db/queries/library';
 
 // PRP-03 Deliverable 3 — THE PREP TAB (PRD §5.7's "Fit / Resume / Prep 三段推进"), rendered
 // as `{children}` inside FIT-03's `[id]/layout.tsx` three-段 shell. Modelled line-for-line on
@@ -39,9 +44,22 @@ import { getJob } from '@/lib/db/queries/jobs';
 // an error rather than degrade into a 404. `requireUserId` throws `UnauthorizedError` —
 // propagated, not wrapped (middleware already gated /jobs/*).
 //
-// STATIC import of `@/lib/db/queries/jobs` — import-safe with DATABASE_URL unset via its
-// memoized lazy dbIndex(), pinned by the build-guard test in page.test.tsx — exactly as the
-// Fit and resume pages do. Do NOT add a top-level `@/db/index` import.
+// STATIC import of `@/lib/db/queries/{jobs,briefs,library}` — all three import-safe with
+// DATABASE_URL unset via their memoized lazy dbIndex(), pinned by the build-guard test in
+// page.test.tsx — exactly as the Fit and resume pages do. Do NOT add a top-level `@/db/index`
+// import.
+//
+// PRP-04 EXTENSION (Deliverable 7). The locked branch + all guard scaffolding above are
+// preserved verbatim (PRP-03 Feedback obligation #2); ONLY the unlocked placeholder is
+// replaced. The unlocked branch adds TWO session-scoped reads on top of getJob — getBrief (the
+// job's Brief, or null) and getLibrary (for the projectId→name map) — both of which THROW on
+// stored-row drift (loud-failure policy) and are NOT wrapped. Two sub-branches (D15):
+//   • a Brief EXISTS → render <BriefView> server-side (the reload path: NO generation, NO
+//     fetch — acceptance item 5). getBrief returns briefs.ts's RELAXED PersistedBrief
+//     (rehearse.questions may be < 5, plan D4 / PRP-02 D5); it is consumed as DATA and MUST
+//     NOT be re-parsed against the strict FND-03 Brief (briefs.ts header). `dropped` is not
+//     persisted, so the reload path passes 0 / [].
+//   • no Brief → hand off to <BriefGenerator> (the only path that fetches — RESEARCH→REHEARSE).
 
 export const dynamic = 'force-dynamic';
 
@@ -59,17 +77,32 @@ export default async function JobPrepPage({ params }: { params: Promise<{ id: st
     return <LockScreen jobId={id} />;
   }
 
-  // === UNLOCKED-STATE PLACEHOLDER — PRP-04 REPLACES THIS BLOCK ===
-  // PRP-04 wires RESEARCH → REHEARSE + Brief rendering here. PRP-03 makes NO RESEARCH/REHEARSE
-  // call, not even here (ticket Non-goals) — keep this a PURE render with ZERO fetch so both
-  // "locked branch makes no API calls" and "unlocked placeholder makes no API calls" hold
-  // until PRP-04 (a test pins zero fetch on every render). Per PRP-03 Feedback obligation #2,
-  // PRP-04 may restructure this file freely but MUST preserve the locked-state behavior above
-  // (the locked-branch tests + the button's behavior must still pass — regression-test them).
-  return (
-    <section aria-labelledby="prep-heading">
-      <h2 id="prep-heading">Interview prep</h2>
-      <p>Your interview brief will appear here.</p>
-    </section>
-  );
+  // === UNLOCKED (job.status === 'interviewing'): render the brief, or generate it ===
+  // PRP-04 Deliverable 7. Two reads, both session-scoped (PRD §8.3), both import-safe with
+  // DATABASE_URL unset (lazy dbIndex — build-guard test). getBrief/getLibrary THROW on row
+  // drift (loud-failure policy) — NOT wrapped (a drifted row is a 500-class bug, not a 404).
+  const [brief, library] = await Promise.all([getBrief(userId, id), getLibrary(userId)]);
+  const projectNames = projectNameMap(library);
+
+  // D15 — Brief exists → render it server-side (reload path: NO generation, NO fetch;
+  // acceptance item 5). `brief` is briefs.ts's RELAXED PersistedBrief (rehearse.questions may
+  // be < 5, D4/PRP-02 D5) — consumed as data, NOT re-parsed against strict Brief. `dropped` is
+  // not persisted, so the reload path passes 0 / [] (D3 / Deliverable 6).
+  if (brief) {
+    return (
+      <BriefView
+        intel={brief.intel}
+        rehearse={brief.rehearse}
+        ledger={job.ledger}
+        projectNames={projectNames}
+        droppedCount={0}
+        droppedItems={[]}
+      />
+    );
+  }
+
+  // No Brief yet → the client generator runs RESEARCH → REHEARSE and renders BriefView from the
+  // REHEARSE response (D2/D3). It receives job.ledger (recap) + projectNames (question
+  // grouping); it does NOT need the library itself (REHEARSE re-reads it server-side).
+  return <BriefGenerator jobId={id} ledger={job.ledger} projectNames={projectNames} />;
 }

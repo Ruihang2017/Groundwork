@@ -1,32 +1,47 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import {
+  LIBRARY_FIXTURE,
+  REHEARSE_FIXTURE,
+  briefFixture,
+  rehearseResponseFixture,
+  researchResponseFixture,
+} from '@/app/(app)/jobs/[id]/prep/_fixtures/brief-fixtures';
 import { jobFixture } from '@/app/(app)/jobs/_fixtures/job-fixtures';
 
-// PRP-03 acceptance item 1 + the module-level "no RESEARCH/REHEARSE" gate (plan §3).
-// Mirrors app/(app)/jobs/[id]/page.test.tsx's scaffolding.
+// PRP-03 acceptance item 1 + PRP-04 Deliverable 7 (plan §3). Mirrors
+// app/(app)/jobs/[id]/page.test.tsx's scaffolding.
 //
-// Tests 1–4's assertions about the UNLOCKED PLACEHOLDER are transient: PRP-04 replaces that
-// branch and will update test 4 accordingly (Feedback obligation #2). What PRP-04 must keep
-// green are the LOCKED-branch tests (1–3) and the button's own behavior — those are the real
-// page-level lock this ticket owns.
+// The LOCKED-branch tests (1–3) + the auth/scoping/guard tests are PRP-03 regressions and are
+// unchanged (PRP-03 Feedback obligation #2: PRP-04 preserves the locked-state behaviour). The
+// UNLOCKED-branch assertions changed from PRP-03's transient placeholder ("Interview prep" /
+// "Your interview brief will appear here") to real brief content: the generator's progress UI
+// when no Brief exists, and <BriefView> when one does (acceptance item 5 pins that a reload of
+// an existing Brief triggers NO regeneration fetch).
 
-const { mockRequireUserId, mockGetJob, mockNotFound } = vi.hoisted(() => ({
-  mockRequireUserId: vi.fn(),
-  mockGetJob: vi.fn(),
-  // The real notFound() throws — a non-throwing mock would let execution continue past the
-  // guard and go green for the wrong reason.
-  mockNotFound: vi.fn(() => {
-    throw new Error('NEXT_NOT_FOUND');
+const { mockRequireUserId, mockGetJob, mockGetBrief, mockGetLibrary, mockNotFound } = vi.hoisted(
+  () => ({
+    mockRequireUserId: vi.fn(),
+    mockGetJob: vi.fn(),
+    mockGetBrief: vi.fn(),
+    mockGetLibrary: vi.fn(),
+    // The real notFound() throws — a non-throwing mock would let execution continue past the
+    // guard and go green for the wrong reason.
+    mockNotFound: vi.fn(() => {
+      throw new Error('NEXT_NOT_FOUND');
+    }),
   }),
-}));
+);
 
 vi.mock('@/lib/auth/session', () => ({
   requireUserId: mockRequireUserId,
   UnauthorizedError: class UnauthorizedError extends Error {},
 }));
 vi.mock('@/lib/db/queries/jobs', () => ({ getJob: mockGetJob }));
+vi.mock('@/lib/db/queries/briefs', () => ({ getBrief: mockGetBrief }));
+vi.mock('@/lib/db/queries/library', () => ({ getLibrary: mockGetLibrary }));
 // R3 — the locked branch renders <LockScreen> → <StatusTransitionButton>, which calls
 // useRouter() at render. The mock must provide BOTH notFound (this page) and useRouter (the
 // child button); without useRouter the real hook throws "invariant expected app router".
@@ -41,6 +56,10 @@ const JOB_ID = 'job-1';
 beforeEach(() => {
   mockRequireUserId.mockResolvedValue(TEST_USER_ID);
   mockGetJob.mockResolvedValue(jobFixture());
+  // Defaults: no Brief yet, a non-empty library. The locked-branch tests never reach these
+  // reads (the lock check returns first), so the default status 'screening' keeps them stable.
+  mockGetBrief.mockResolvedValue(null);
+  mockGetLibrary.mockResolvedValue(LIBRARY_FIXTURE);
 });
 
 afterEach(cleanup);
@@ -50,11 +69,20 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
-function stubFetch(status = 200, body: unknown = {}) {
-  const fetchMock = vi.fn().mockResolvedValue({
-    ok: status >= 200 && status < 300,
-    status,
-    json: async () => body,
+type Reply = { status: number; body?: unknown };
+
+/** Queues replies in call order; extra calls reuse the last. Defaults to a single 200 {}. */
+function stubFetch(...replies: Reply[]) {
+  const queue = replies.length > 0 ? replies : [{ status: 200, body: {} }];
+  let call = 0;
+  const fetchMock = vi.fn().mockImplementation(async () => {
+    const reply = queue[Math.min(call, queue.length - 1)];
+    call += 1;
+    return {
+      ok: reply.status >= 200 && reply.status < 300,
+      status: reply.status,
+      json: async () => reply.body ?? {},
+    };
   });
   vi.stubGlobal('fetch', fetchMock);
   return fetchMock;
@@ -66,7 +94,7 @@ async function renderPage(id = JOB_ID) {
 }
 
 const lockButton = () => screen.queryByRole('button', { name: /i got the interview/i });
-const unlockedHeading = () => screen.queryByRole('heading', { name: /interview prep/i });
+const briefHeading = () => screen.queryByRole('heading', { name: /interview brief/i });
 
 describe('JobPrepPage — the page-level lock (PRP-03 acceptance item 1)', () => {
   it('[machine] status "screening" renders the LockScreen, not the unlocked branch', async () => {
@@ -74,7 +102,7 @@ describe('JobPrepPage — the page-level lock (PRP-03 acceptance item 1)', () =>
     await renderPage();
 
     expect(lockButton()).toBeTruthy();
-    expect(unlockedHeading()).toBeNull();
+    expect(briefHeading()).toBeNull();
   });
 
   it('[machine] status "applied" renders the LockScreen, not the unlocked branch', async () => {
@@ -82,7 +110,7 @@ describe('JobPrepPage — the page-level lock (PRP-03 acceptance item 1)', () =>
     await renderPage();
 
     expect(lockButton()).toBeTruthy();
-    expect(unlockedHeading()).toBeNull();
+    expect(briefHeading()).toBeNull();
   });
 
   it('[machine] status "closed" renders the LockScreen (branch is !== interviewing, not a screening whitelist)', async () => {
@@ -90,28 +118,64 @@ describe('JobPrepPage — the page-level lock (PRP-03 acceptance item 1)', () =>
     await renderPage();
 
     expect(lockButton()).toBeTruthy();
-    expect(unlockedHeading()).toBeNull();
-  });
-
-  it('[machine] status "interviewing" renders the unlocked placeholder, not the LockScreen', async () => {
-    mockGetJob.mockResolvedValue(jobFixture({ status: 'interviewing' }));
-    await renderPage();
-
-    expect(unlockedHeading()).toBeTruthy();
-    expect(lockButton()).toBeNull();
+    expect(briefHeading()).toBeNull();
   });
 });
 
-describe('JobPrepPage — makes NO API call on any render (module-level gate)', () => {
-  it('[machine] never fetches on render for any of the four statuses (locked OR unlocked)', async () => {
+describe('JobPrepPage — the unlocked branch (PRP-04 Deliverable 7)', () => {
+  it('[machine] interviewing + NO persisted Brief renders the generator progress UI (RESEARCH first)', async () => {
+    mockGetJob.mockResolvedValue(jobFixture({ status: 'interviewing' }));
+    mockGetBrief.mockResolvedValue(null);
+    stubFetch(
+      { status: 200, body: researchResponseFixture() },
+      { status: 200, body: rehearseResponseFixture() },
+    );
+    await renderPage();
+
+    // The generator mounts in the 'researching' phase (proven end-to-end in
+    // brief-generator.test.tsx; here we only assert it mounted).
+    expect(screen.getByRole('status').textContent).toMatch(/researching the company/i);
+    expect(lockButton()).toBeNull();
+    // Let the auto-fired sequence settle so no state update leaks past the test.
+    await waitFor(() => expect(screen.getByText(REHEARSE_FIXTURE.positioning)).toBeTruthy());
+  });
+
+  it('[machine] interviewing + a persisted Brief renders BriefView, not the LockScreen', async () => {
+    mockGetJob.mockResolvedValue(jobFixture({ status: 'interviewing' }));
+    mockGetBrief.mockResolvedValue(briefFixture());
+    await renderPage();
+
+    expect(briefHeading()).toBeTruthy();
+    expect(screen.getByText(REHEARSE_FIXTURE.positioning)).toBeTruthy();
+    expect(lockButton()).toBeNull();
+  });
+
+  it('[machine] acceptance item 5: a SECOND render of an already-generated Brief triggers NO regeneration fetch', async () => {
+    mockGetJob.mockResolvedValue(jobFixture({ status: 'interviewing' }));
+    mockGetBrief.mockResolvedValue(briefFixture());
+    const fetchMock = stubFetch();
+    await renderPage();
+
+    // Flush any queued effects before asserting the negative (as the Fit tab test does).
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(screen.getByText(REHEARSE_FIXTURE.positioning)).toBeTruthy();
+  });
+});
+
+describe('JobPrepPage — makes NO API call on the locked branch or the reload path', () => {
+  it('[machine] never fetches on render for the three locked statuses or interviewing-with-Brief', async () => {
     const fetchMock = stubFetch();
 
-    for (const status of ['screening', 'applied', 'closed', 'interviewing'] as const) {
+    for (const status of ['screening', 'applied', 'closed'] as const) {
       mockGetJob.mockResolvedValue(jobFixture({ status }));
       await renderPage();
     }
+    // The reload path (a Brief already exists) is a pure server render — also zero fetch.
+    mockGetJob.mockResolvedValue(jobFixture({ status: 'interviewing' }));
+    mockGetBrief.mockResolvedValue(briefFixture());
+    await renderPage();
 
-    // Flush any queued effects before asserting the negative (as the Fit tab test does).
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -166,6 +230,8 @@ describe('JobPrepPage — module contract', () => {
     vi.stubEnv('DATABASE_URL', '');
     vi.resetModules();
     vi.doUnmock('@/lib/db/queries/jobs');
+    vi.doUnmock('@/lib/db/queries/briefs');
+    vi.doUnmock('@/lib/db/queries/library');
 
     await expect(import('@/app/(app)/jobs/[id]/prep/page')).resolves.toBeDefined();
     await expect(import('@/db/index')).rejects.toThrow(/DATABASE_URL/);
