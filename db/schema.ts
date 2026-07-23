@@ -349,3 +349,48 @@ export const verificationTokens = pgTable(
   },
   (table) => [primaryKey({ columns: [table.identifier, table.token] })],
 );
+
+// --- invite_codes (PLT-04) ----------------------------------------------------
+// Invite-code gated registration (PRD §9: "上线初期以邀请码控制注册节奏"). Stored in
+// Postgres rather than a static env-var list because per-code usage tracking (who
+// consumed it, when) is the whole point — see docs/prd/07-platform-launch/README.md.
+//
+// FOUR NON-OBVIOUS RULES, each load-bearing. Read them before touching this table
+// or lib/db/queries/invite-codes.ts.
+//
+// 1. `used_at` — NOT `used_by` — IS THE SINGLE-USE GUARD. Because the FK below is
+//    ON DELETE SET NULL (rule 2), hard-deleting an account nulls `used_by` on that
+//    user's code. A `WHERE used_by IS NULL` redemption guard (which is what
+//    PLT-04's ticket text literally asked for) would therefore hand the code back
+//    out, letting ONE code mint unlimited accounts via delete-and-re-register — a
+//    direct bypass of the registration pacing this table exists to enforce.
+//    `used_at` is written exactly once, at claim time, and is NEVER cleared by any
+//    application code path.
+// 2. `onDelete: 'set null'` IS MANDATORY, NOT STYLISTIC. PLT-01's hard delete ends
+//    with `DELETE FROM users WHERE id = $1` (app/api/account/delete/route.ts) and
+//    knows nothing about this table; the default (NO ACTION) FK action would make
+//    that DELETE FAIL for every user who ever used a code, silently breaking PRD
+//    §5.6's "删号 = 硬删该用户全部数据". `'cascade'` is equally wrong — it would
+//    delete the whole invite_codes row, destroying the "when was this code
+//    consumed" record that is the entire reason a table was chosen over a list.
+//    lib/db/queries/invite-codes.test.ts pins both halves of this.
+// 3. `used_by` IS ADVISORY ATTRIBUTION, NEVER A CONTROL. It is filled best-effort
+//    by auth.ts's `createUser` event (there is no users row yet when the gate
+//    runs — see auth.ts's createInviteGate comment), so it may legitimately stay
+//    NULL: for a magic link opened in a browser that no longer holds the cookie,
+//    and permanently once that user deletes their account. NO LOGIC MAY BRANCH ON
+//    IT.
+// 4. No extra index (every lookup is by `code`, the primary key) and NO EMAIL OR
+//    OTHER PII COLUMN — that omission plus rule 2 is what keeps a hard-deleted
+//    user's residue here non-identifying (PRD §5.6 / §12) without PLT-01's delete
+//    route needing to know this table exists.
+//
+// `used_at` / `created_at` are bigint epoch-ms per this file's convention #1.
+export const inviteCodes = pgTable('invite_codes', {
+  code: text('code').primaryKey(),
+  usedBy: text('used_by').references(() => users.id, { onDelete: 'set null' }),
+  usedAt: bigint('used_at', { mode: 'number' }),
+  createdAt: bigint('created_at', { mode: 'number' })
+    .notNull()
+    .$defaultFn(() => Date.now()),
+});

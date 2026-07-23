@@ -55,3 +55,90 @@ describe('SignInPage (acceptance item 2)', () => {
     );
   });
 });
+
+// --- PLT-04: the invite-code field + its cookie carrier (Deliverable 5) --------
+describe('SignInPage — invite code (PLT-04)', () => {
+  /** Wipe gw_invite between tests: document.cookie is shared jsdom state. */
+  function clearInviteCookie() {
+    document.cookie = 'gw_invite=; Path=/; Max-Age=0; SameSite=Lax';
+  }
+  afterEach(clearInviteCookie);
+
+  function inviteInput() {
+    return screen.getByLabelText(/invite code/i);
+  }
+
+  it('renders a labelled invite-code input that is NOT required', () => {
+    render(<SignInPage />);
+    const input = inviteInput() as HTMLInputElement;
+    expect(input).toBeTruthy();
+    // NOT required: a returning user signing in by magic link must be able to
+    // submit with it empty (ticket Non-goal 3 — existing users are never asked
+    // for a code). A `required` here would lock every returning user out.
+    expect(input.required).toBe(false);
+  });
+
+  it('does not disable the Google button when the field is empty (returning Google users)', () => {
+    render(<SignInPage />);
+    const button = screen.getByRole('button', {
+      name: /continue with google/i,
+    }) as HTMLButtonElement;
+    expect(button.disabled).toBe(false);
+  });
+
+  it('submitting the magic-link form writes the code to the gw_invite cookie AND still calls signIn("resend", …)', () => {
+    render(<SignInPage />);
+    fireEvent.change(screen.getByLabelText(/^email$/i), {
+      target: { value: 'user@example.com' },
+    });
+    fireEvent.change(inviteInput(), { target: { value: 'K7QD-2M9V-XBTR' } });
+    fireEvent.click(screen.getByRole('button', { name: /send/i }));
+
+    expect(document.cookie).toContain('gw_invite=K7QD-2M9V-XBTR');
+    expect(signIn).toHaveBeenCalledWith(
+      'resend',
+      expect.objectContaining({
+        email: 'user@example.com',
+        callbackUrl: '/home',
+      }),
+    );
+  });
+
+  it('clicking "Continue with Google" ALSO writes the cookie — Google sign-up is gated too', () => {
+    // Wiring the field only into the magic-link form would let anyone create an
+    // account through Google, since the gate runs identically for both providers.
+    render(<SignInPage />);
+    fireEvent.change(inviteInput(), { target: { value: 'K7QD-2M9V-XBTR' } });
+    fireEvent.click(screen.getByRole('button', { name: /continue with google/i }));
+
+    expect(document.cookie).toContain('gw_invite=K7QD-2M9V-XBTR');
+    expect(signIn).toHaveBeenCalledWith(
+      'google',
+      expect.objectContaining({ callbackUrl: '/home' }),
+    );
+  });
+
+  it('submitting with the field EMPTY CLEARS any leftover cookie (the shared-browser guard)', () => {
+    // This is what makes the 24h Max-Age safe: every sign-in attempt starts on
+    // this page and runs the cookie writer, so a code left behind by one visitor
+    // can never be silently consumed by a different new user on the same browser.
+    document.cookie = 'gw_invite=STALE-CODE-0001; Path=/; SameSite=Lax';
+    expect(document.cookie).toContain('gw_invite=STALE-CODE-0001');
+
+    render(<SignInPage />);
+    fireEvent.change(screen.getByLabelText(/^email$/i), {
+      target: { value: 'returning@example.com' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /send/i }));
+
+    expect(document.cookie).not.toContain('gw_invite=STALE-CODE-0001');
+    expect(document.cookie).not.toContain('gw_invite=');
+  });
+
+  it('trims surrounding whitespace before writing the cookie', () => {
+    render(<SignInPage />);
+    fireEvent.change(inviteInput(), { target: { value: '  K7QD-2M9V-XBTR  ' } });
+    fireEvent.click(screen.getByRole('button', { name: /continue with google/i }));
+    expect(document.cookie).toContain('gw_invite=K7QD-2M9V-XBTR');
+  });
+});

@@ -2,8 +2,8 @@
 
 | | |
 |---|---|
-| 版本 | v0.5 |
-| 日期 | 2026-07-17 |
+| 版本 | v0.6 |
+| 日期 | 2026-07-23 |
 | 上游 | [docs/PRD.md](../../PRD.md) §3 C5, §8.3, §8.4, §9, §10 P5 |
 | 状态 | Draft → Gate 1 评审 |
 
@@ -30,6 +30,7 @@ PRD §3 C5（上线基线）："注册登录、用量配额、隐私政策与删
 | 邀请码存 Postgres 新表 `invite_codes`，不用 env var 静态列表 | §8.1"配额用 Postgres 计数器"体现的"无聊技术栈但用数据库、不用临时方案"倾向；邀请码需要跟踪使用状态（谁用了、何时用），env var 静态列表无法记录使用状态 |
 | `/admin` 鉴权用 env var 邮箱白名单 | PRD 未定义管理员鉴权机制（本次拆解新发现的开放问题）；采用与 §9"邀请码控制注册节奏"、§8.3"全局日花费熔断阈值（env）"一致的 env var 风格作为默认，待 Horace 确认 |
 | 备份走 GitHub Actions cron + `pg_dump` → Cloudflare R2，不引入额外备份服务 | §8.2 架构图"每周 `pg_dump`（GitHub Actions cron）→ Cloudflare R2" |
+| 邀请码从登录表单送达服务端走**客户端写入的短期 cookie `gw_invite`**（`SameSite=Lax`，非 httpOnly，24h），由 `auth.ts` 的 per-request `NextAuth(async (req) => …)` 工厂读出并闭包进 `signIn` callback（PLT-04 Builder writeback，2026-07-23） | 强制而非偏好：`@auth/core` 的 `signIn` callback 不接收 request，且 Google 流程在重定向前没有任何服务端钩子——门禁只能跑在 `GET /api/auth/callback/google` 这个**不带表单 body** 的顶层导航上。cookie 是唯一对两个 provider 都成立的通道（被否决的替代方案与各自的失败模式见 `docs/plans/PLT-04.md` §4 R-6）。**该 cookie 不是安全边界**：内容由用户可写，全部安全性来自服务端的原子兑换。**未建 ADR**（`docs/adr/` 仍为空，沿用 PLT-03 的先例）——若第二个票据需要同一机制，或 Horace 在 P5 确认，则提升为 `docs/adr/0001-*.md` |
 
 ## 拒绝的备选方案
 
@@ -43,6 +44,10 @@ PRD §3 C5（上线基线）："注册登录、用量配额、隐私政策与删
 | 1 | `/admin` 页面的管理员鉴权机制未在 PRD 中定义 | Horace（product）——PLT-03 默认实现为 env var 邮箱白名单，需 Horace 确认或改设计 |
 | 2 | 产品名与域名最终确认（继承自 `01-foundation/README.md`，影响本模块的 Privacy/ToS 页文案与备份/R2 命名空间） | Horace（product） |
 | 3 | Vercel/Neon/Resend/R2 的真实账号与凭据配置（继承自 `01-foundation/README.md`） | Horace（product/infra） |
+| 4 | **邀请码双重兑换的生产级验证仍未完成**（PLT-04 Feedback obligation #1，**未 discharge**）。原子性测试跑在 PGlite（单连接 WASM Postgres）上，`Promise.all` 会被串行化——它证明了 guarded-UPDATE 谓词正确（且实现不是 SELECT-then-UPDATE），但**没有**触发真实行锁竞争。生产保证依赖 Postgres READ COMMITTED 行锁 + EvalPlanQual 对 `WHERE used_at IS NULL` 的重新求值，需要一次真实 Neon 实例上的并发验证 | Horace（需要真实 `DATABASE_URL`，阻塞于开放问题 #3）——票据判定「若该竞态在真实并发下仍存在则为 P0」，P5 sign-off 前必须做 |
+| 5 | 邀请码通过**魔法链接**注册时，码在「发信请求」时即被消耗，而非在「点击链接」时（PLT-04 plan §4 R-2 / §5 Q2）。代价：邮件丢失/进垃圾箱则该码作废（补救：另发一个码，或清空该行 `used_at`）。反向选择可恢复重试，但会拒绝跨设备打开链接的用户，并让一个码可触发无限封邮件 | Horace（product）——默认按现实现，首轮真实邀请后复盘 |
+| 6 | 邀请码生成目前只有 CLI（`node scripts/generate-invite-codes.mjs --count N`），是否需要并入 `/admin` 页（PLT-04 Feedback obligation #2） | Horace（product）——若要做**必须开新票据**（会触及 PLT-03 的 file scope），不得回溯改 PLT-03 或 PLT-04 |
+| 7 | 被拒绝的注册会落到 Auth.js 内置的 `/api/auth/error?error=AccessDenied`，页面完全不提邀请码（PLT-04 plan §5 Q3）。修复需在 `auth.config.ts` 加 `pages.error`，超出 PLT-04 file scope | Horace（product）确认值得做后，开新票据（owner: `auth.config.ts`） |
 
 ## 工作分解
 
@@ -89,3 +94,10 @@ PRD §3 C5（上线基线）："注册登录、用量配额、隐私政策与删
   - **dropped 数值不是 PRD 的 dropped 率**：票据字面公式 `SUM(droppedCount)/COUNT(*)` 是「每次操作的平均 dropped 条数」，而 §6/§7 的 `dropped < 15%` 门槛除以候选条目总数——`usage_events` 无此列，故页面明确标注为 "Dropped items per operation (7d avg)" 并写明不可与 15% 门槛对比。真正的比率需扩列（票据 Feedback obligation #3），属后续票据。
   - **窗口不对称是有意的**：成本/延迟/dropped 为滚动 7 天，漏斗转化为 all-time（票据定义本身不含窗口），页面两处都显式标注周期；`interviewingToBrief` 为「当前 interviewing 群体」的时点快照（`jobs.status` 是状态非历史），已在页面标注，读数偏低属产品信号而非本票据缺陷。
   - **仍不可离线验证**（沿袭 FND-05/FND-08 的既有基础设施开放问题，非本票据引入）：Edge 运行时是否在构建期内联 `ADMIN_EMAILS`（故 `.env.example` 注明改值后需 redeploy），以及 middleware 中 `auth()` 的 database session 策略在 Edge 是否可用。两者均 fail-closed。
+
+- v0.6（2026-07-23，PLT-04 Builder writeback）：PLT-04（邀请码注册门控）Deliverables 1–5 实现完成，**本模块 4 张票据的构建阶段至此全部完成**。全套测试 **653 通过（57 文件）**，其中本票据新增 77 项（新文件 `lib/db/queries/invite-codes.test.ts` 20、`tests/generate-invite-codes.test.ts` 13、`db/schema-invite-codes.test.ts` 12，追加 `auth.test.ts` +26、`app/(auth)/signin/page.test.tsx` +6，全部已在运行输出中逐一核对被收集）；`pnpm lint` clean；**完全无 env var** 的 `next build` exit 0（新增的 `lib/db/queries/invite-codes.ts` 会被 `auth.ts` 拉进 middleware 的 Edge 打包图，这是本票据最可能的构建期陷阱，已用 lazy `@/db/index` 导入 + 测试锁死）。新增 `db/schema.ts` 的 `invite_codes` 表（追加）+ 迁移 `0003_tiresome_rictor.sql`、`lib/db/queries/invite-codes.ts`、`scripts/generate-invite-codes.mjs`，并向 `auth.ts`、`app/(auth)/signin/page.tsx` 追加（append-only）；`auth.config.ts` **一字未改**。要点（完整 deviations 见 `tickets/PLT-04-invite-codes.md` 的 Changelog v0.1）：
+  - **票据文本与 `@auth/core` 实际行为有五处冲突，均由 Architect 在 planning 期核实并有意偏离**（非实现漂移）：(a) 门禁运行时 `users` 行尚不存在，`usedBy` 改由 `createUser` 事件事后归因，`redeemInviteCode` 的第二参数放宽为 `string | null`；(b) 单次使用的守卫列是 `used_at` 而非票据字面的 `used_by`；(c) 外键必须是 `ON DELETE SET NULL`；(d) `signIn` callback 实际在 `auth.config.ts`，改为在 `auth.ts` 的 per-request 工厂里**包裹**它；(e) 邀请码走 cookie 而非 `signIn()` 选项（见上方新增的决策行）。
+  - **(b)+(c) 合起来堵的是一个真实绕过**：外键若用默认 `NO ACTION`，PLT-01 的 `DELETE FROM users` 会对所有用过码的用户直接报错，静默破坏 PRD §5.6 的硬删承诺；而一旦改成 `SET NULL`，若守卫列还是 `used_by`，删号即可释放邀请码 → **一个码可无限注册**。两侧都有回归测试。
+  - **原子性用单条 guarded UPDATE ... RETURNING**（`WHERE code = $1 AND used_at IS NULL`），不是 SELECT-then-UPDATE、不是事务（neon-http 不支持事务）。除行为测试外还有一条结构断言，防止后续重构把它改回读-写两步——那种 TOCTOU 窗口在 PGlite 上**测不出来**。
+  - **`[human]` 票据 Feedback obligation #1 未 discharge**，已登记为上方开放问题 #4：PGlite 是单连接，测试证明的是谓词正确性而非真实行锁竞争，需要一次真实 Neon 并发验证。测试文件内已写明该边界，green run 不得被当作生产保证上报。
+  - **未建 ADR、未加限流、未做自定义错误页**，理由分别见票据 Changelog 与上方开放问题 #7；邀请码熵（`node:crypto`，~59 bit）即为防猜控制，故 `Math.random` 被源码级断言禁止，且缩短码格式会使限流变成必需。
