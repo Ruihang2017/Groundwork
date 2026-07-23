@@ -152,9 +152,29 @@ export const resumes = pgTable(
 );
 
 // --- jobs ---------------------------------------------------------------------
-// `jd`/`ledger`/`fit` are NOT NULL with no default — the DB-level mirror of
-// FND-04's Job atomicity guarantee (a Job only exists once READ+CROSS+SCORE have
-// produced all three). Do not relax without the escalation path FND-04's
+// `jd` is NOT NULL: READ always produces a JdExtract before the row is created, so
+// a job without a `jd` is meaningless and must be rejected by the database itself.
+//
+// `ledger` and `fit` are DELIBERATELY NULLABLE (amended by 04-fit/FIT-01, migration
+// 0003 — see docs/plans/FIT-01.md §0.1 resolution R-A; the original FND-05 comment
+// here declared all three NOT NULL as a mirror of FND-04's atomicity guarantee).
+// Reason: "Fit" is ONE user-facing operation delivered as TWO server calls —
+// FIT-01's POST /api/jobs creates the row with `jd` only, and FIT-02's
+// POST /api/jobs/[id]/fit fills `ledger` + `fit` together in one atomic write. A
+// job id in FIT-02's path means the row must already exist, so the DB cannot demand
+// all three columns at insert time. `ledger`/`fit` must still be written TOGETHER
+// (there is no legitimate "ledger but no fit" state); that pairing is enforced by
+// lib/db/queries/jobs.ts's `attachLedgerAndFit`, which sets both in one statement,
+// not by a DB constraint.
+//
+// FND-04's Zod `Job` (lib/schemas/persisted.ts) is UNCHANGED and stays
+// non-nullable: it is the COMPLETE-Job API contract. A row may be transiently
+// incomplete in the window between the two calls, but a complete `Job` is only ever
+// returned over the API once FIT-02 has finished. The DB-facing contract — the one
+// that admits the nulls — is `PersistedJob` in lib/db/queries/jobs.ts. Read that
+// module before changing anything here.
+//
+// Do not re-tighten (or further relax) these without the escalation path FND-04's
 // Feedback obligation #2 specifies.
 export const jobs = pgTable(
   'jobs',
@@ -170,8 +190,8 @@ export const jobs = pgTable(
     status: jobStatusEnum('status').notNull(),
     jdRaw: text('jd_raw').notNull(),
     jd: jsonb('jd').notNull().$type<JdExtract>(),
-    ledger: jsonb('ledger').notNull().$type<Ledger>(),
-    fit: jsonb('fit').notNull().$type<FitReport>(),
+    ledger: jsonb('ledger').$type<Ledger>(), // nullable until FIT-02 — see above
+    fit: jsonb('fit').$type<FitReport>(), // nullable until FIT-02 — see above
     createdAt: bigint('created_at', { mode: 'number' })
       .notNull()
       .$defaultFn(() => Date.now()),
