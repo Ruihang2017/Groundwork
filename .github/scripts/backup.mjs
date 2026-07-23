@@ -100,7 +100,22 @@ export function uploadCommand(fileName, env = process.env) {
 
 // Returns the process exit code. Throws on any dump/upload/integrity failure so the
 // workflow fails loudly (fail-closed) instead of reporting a false success.
-export function runBackup() {
+// ISS-31: `deps.exec` and `deps.stat` are TEST-ONLY injection seams. Both default to
+// the real node:child_process / node:fs implementations, so the production call site
+// below (`runBackup()`, no argument) runs byte-for-byte the same commands it always
+// has — `bash -c 'set -o pipefail; …'` resolved from the GitHub Actions runner's PATH.
+// Deliberately a PARAMETER, never an environment variable: this script executes in a
+// job that holds DATABASE_URL and the R2 secret key in its environment, and an
+// env-driven "which binary do I exec" switch would hand anything that can set env in
+// that job a code-execution lever on a credential-bearing process. A parameter cannot
+// be influenced by the environment at all. Rationale: docs/plans/ISS-31.md §2.2.
+// The seam exists because tests/backup.test.ts previously proved these guarantees by
+// executing an AMBIENT `bash` lookup, which made the suite's outcome depend on which
+// bash won the local PATH race (issue #31).
+export function runBackup(deps = {}) {
+  const exec = deps.exec ?? execFileSync;
+  const stat = deps.stat ?? statSync;
+
   const missing = REQUIRED_ENV.filter((key) => !process.env[key]);
   if (missing.length > 0) {
     // Exact phrase from the ticket's Deliverable 1 ("R2 credentials not configured,
@@ -116,7 +131,7 @@ export function runBackup() {
   const fileName = backupFileName();
 
   const dump = dumpCommand(fileName);
-  execFileSync(dump.command, dump.args, {
+  exec(dump.command, dump.args, {
     stdio: 'inherit',
     env: { ...process.env, ...dump.env },
   });
@@ -124,7 +139,7 @@ export function runBackup() {
   // Integrity guard: never upload an empty/near-empty archive. pipefail already fails
   // the run on a pg_dump *error*; this additionally catches a pg_dump that exits 0
   // having written no data (the "structurally valid but empty gzip" case).
-  const { size } = statSync(fileName);
+  const { size } = stat(fileName);
   if (size < MIN_BACKUP_BYTES) {
     throw new Error(
       `backup aborted: ${fileName} is ${size} bytes (< ${MIN_BACKUP_BYTES}); ` +
@@ -133,7 +148,7 @@ export function runBackup() {
   }
 
   const upload = uploadCommand(fileName);
-  execFileSync(upload.command, upload.args, {
+  exec(upload.command, upload.args, {
     stdio: 'inherit',
     env: { ...process.env, ...upload.env },
   });
