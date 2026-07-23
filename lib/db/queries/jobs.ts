@@ -1,4 +1,4 @@
-import { and, eq } from 'drizzle-orm';
+import { and, desc, eq } from 'drizzle-orm';
 import { z } from 'zod';
 
 import { jobs } from '@/db/schema';
@@ -232,4 +232,69 @@ export async function attachLedgerAndFit(
     .where(and(eq(jobs.id, jobId), eq(jobs.userId, userId)))
     .returning();
   return row ? parseRow(userId, row) : null;
+}
+
+// --- FIT-03 append (same lane, sequential; FIT-01/FIT-02 merged) --------------
+
+/**
+ * The Jobs-list projection. A NARROW PROJECTION, not a `PersistedJob` —
+ * docs/plans/FIT-03.md D1, a DELIBERATE deviation from FIT-03's Deliverable 3,
+ * which literally says `listJobs(userId): Promise<Job[]>`. Three reasons, all
+ * recorded in the ticket's Changelog / Deviations:
+ *
+ *   (a) PRIVACY (PRD §8.1's data-minimisation posture). The list renders company,
+ *       role, status and a date. Returning whole rows would pull every job's
+ *       `jdRaw` + `jd` + `ledger` + `fit` into one page render — the user's entire
+ *       JD corpus, shipped for nothing.
+ *   (b) BLAST RADIUS. `parseRow` THROWS on stored-row drift (this module's
+ *       loud-failure policy, and rightly so for a single job). But the Jobs list is
+ *       the ONLY navigation entry to every job, so one drifted row would make every
+ *       OTHER job unreachable. The five columns below are NOT NULL scalars/enum
+ *       whose Drizzle types already guarantee their shape, so the failure mode does
+ *       not exist here rather than being handled. Silently skipping unparseable
+ *       rows was the other alternative and is rejected outright — PRD's "宁可暴露
+ *       不完整，不静默吞掉".
+ *   (c) COST. The `jsonb` columns are the bulk of a `jobs` row.
+ *
+ * NO ZOD PARSE, deliberately: re-validating five columns Postgres already
+ * constrains (NOT NULL text / the `job_status` enum / NOT NULL bigint) would assert
+ * nothing that the driver's own types do not. This is the same asymmetry LIB-02
+ * documents for `getResume`. It is an omission with a reason, not an oversight.
+ */
+export type JobListRow = {
+  id: string;
+  company: string;
+  role: string;
+  status: JobStatus;
+  createdAt: number;
+};
+
+/**
+ * Every job the user owns, newest first.
+ *
+ * ORDER BY `createdAt` DESC, NOT `updatedAt`: `updatedAt` is bumped by every status
+ * PATCH (05-tailor's "mark as applied", 06-prep's "I got an interview"), so ordering
+ * by it would silently reshuffle the user's list whenever they moved a job through
+ * the funnel. Creation order is stable and is what a list of applications means.
+ *
+ * NO LIMIT and no pagination: v1 states no requirement for either and one user's job
+ * count is small. Stated rather than left implicit — if a real user's list grows past
+ * a screenful, pagination is a product decision, not a silent addition here.
+ *
+ * `eq(jobs.userId, userId)` is the WHOLE where-clause (PRD §8.3) — there is no id to
+ * scope by, so this is the only ownership boundary and it is not optional.
+ */
+export async function listJobs(userId: string): Promise<JobListRow[]> {
+  const db = await defaultDb();
+  return db
+    .select({
+      id: jobs.id,
+      company: jobs.company,
+      role: jobs.role,
+      status: jobs.status,
+      createdAt: jobs.createdAt,
+    })
+    .from(jobs)
+    .where(eq(jobs.userId, userId))
+    .orderBy(desc(jobs.createdAt));
 }
