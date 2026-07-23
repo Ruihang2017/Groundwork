@@ -98,11 +98,17 @@ describe('db/schema — column sets (Deliverable 1)', () => {
 });
 
 describe('db/schema — NOT NULL constraints', () => {
-  it('jobs.jd / jobs.ledger / jobs.fit are all NOT NULL (FND-04 atomicity mirror)', () => {
+  // AMENDED by 04-fit/FIT-01 (docs/plans/FIT-01.md §0.1 resolution R-A, migration
+  // 0003): `ledger`/`fit` are now DB-nullable because Fit is one user-facing
+  // operation delivered as two server calls (FIT-01 creates the row with `jd`;
+  // FIT-02 fills `ledger`+`fit` together). `jd` stays NOT NULL. FND-04's Zod `Job`
+  // is unchanged — it remains the complete-Job API contract; the DB-facing contract
+  // is `PersistedJob` in lib/db/queries/jobs.ts.
+  it('jobs.jd is NOT NULL while jobs.ledger / jobs.fit are nullable (FIT-01 §0.1 R-A)', () => {
     const cols = getTableColumns(jobs);
     expect(cols.jd.notNull).toBe(true);
-    expect(cols.ledger.notNull).toBe(true);
-    expect(cols.fit.notNull).toBe(true);
+    expect(cols.ledger.notNull).toBe(false);
+    expect(cols.fit.notNull).toBe(false);
   });
 
   it('briefs.intel is nullable and briefs.rehearse is NOT NULL (P3 asymmetry)', () => {

@@ -75,3 +75,37 @@ Unit/integration tests mocking the Anthropic client (same pattern as `03-library
 1. **Escalate, do not silently resolve**: the internal inconsistency flagged in Non-goals (FND-04's non-nullable `Job.jd`/`ledger`/`fit` Zod contract vs. this ticket's two-call READ-then-CROSS design needing an intermediate "jd-only" DB state) must be resolved by (a) confirming with FND-05's actual generated migration whether `jobs.ledger`/`jobs.fit` are DB-level `NOT NULL`, and (b) if they are, filing this as a required amendment to FND-05 (version +0.1, changelog line in `01-foundation/README.md`) making those two columns DB-nullable while keeping the Zod `Job` schema (the API response contract, only ever returned once complete) non-nullable — i.e., the DB row can be transiently incomplete, but this route never RETURNS a `Job` object over the API until FIT-02 completes it. Do not proceed past this ticket's implementation without recording which resolution was chosen, since FIT-02 depends on the DB-level shape being correct.
 2. The atomic-"Fit"-operation / single-quota-charge design (Background) is explicitly flagged as ADR-candidate material — if real usage after P5 launch shows users abandoning between job-creation and Fit-report (e.g. READ succeeds but the client never calls FIT-02, wasting the quota charge with no report produced), that is exactly the kind of data PRD §13's open-questions process expects; escalate to Horace rather than silently changing where quota is charged.
 3. The READ prompt (`lib/read/prompt.ts`) is new, hand-authored content (no legacy asset, per `04-fit/README.md` open question #4) — if it underperforms against real (non-mocked) fixture testing during `pnpm eval` runs once wired end-to-end, fix here and record the regression case per `02-evaluation/README.md`'s changelog convention, same as LIB-01's Feedback obligation item 1.
+
+## Changelog
+
+- v0.1 (2026-07-23, FIT-01 Builder writeback):
+
+  ### REQUIRES HORACE SIGN-OFF — schema amendment (FIT-01 §0.1 R-A)
+
+  **The conflict** (Feedback obligation #1's "escalate, do not silently resolve", verified against the actual merged code, not assumed): FND-05's `db/schema.ts:172–174` and `db/migrations/0000_legal_pandemic.sql:29–31` declared `jobs.jd`, `jobs.ledger` and `jobs.fit` all `NOT NULL`, mirroring FND-04's non-nullable Zod `Job`. But this ticket must create a row from READ's output alone; FIT-02's route is `POST /api/jobs/[id]/fit`, and a job **id in the path** means the row already exists; FIT-03 Deliverable 7 explicitly renders the "Generating your Fit Report…" state for a job whose `fit` is not yet populated. `04-fit/README.md`'s 决策 row 2 was the only artifact in the module assuming one atomic call, and it contradicted its own three tickets.
+
+  **Resolutions considered**
+
+  - **R-A — TAKEN** (= option (b) of Feedback obligation #1): make `jobs.ledger`/`jobs.fit` DB-nullable, keep FND-04's Zod `Job` non-nullable as the *complete-Job API contract*, and introduce a module-local `PersistedJob` (`Job` with nullable `ledger`/`fit`) as the persistence contract. `jd` stays `NOT NULL`.
+  - **R-B — not taken**: keep `NOT NULL` and move row creation into FIT-02. Unimplementable inside this ticket — it deletes Deliverables 2–5, contradicts FIT-02's and FIT-03's already-decided shapes, and requires re-cutting three tickets plus the sub-PRD.
+  - **R-C — rejected outright**: persist placeholder `ledger: {bindings:[],gaps:[]}` / a zeroed `FitReport`. This is exactly the "paper over" the ticket forbids: a persisted zero-score `FitReport` is indistinguishable from a real one, FIT-03 would render "Long shot, score 0" as a genuine verdict, and PLT-03's admin metrics would count it.
+
+  **Merging this ticket IS the sign-off.** If R-A is rejected, stop and re-plan FIT-01/02/03 under R-B — do not patch around it. Evidence trail: `docs/plans/FIT-01.md` §0.1. Write-backs recorded in `docs/prd/01-foundation/README.md` v0.7, FND-04 ticket Changelog v0.2, FND-05 ticket Changelog v0.2, and `docs/prd/04-fit/README.md` v0.2 (决策 row 2 corrected).
+
+  ### Deviations from the ticket text / plan
+
+  1. **Ownership is enforced inside a single scoped `UPDATE … RETURNING`, not by a preceding `getJob`.** Deliverable 5 literally says "verifies the job belongs to the caller (via `getJob`), calls `updateJobStatus`". `updateJobStatus` instead runs one `UPDATE … WHERE id = ? AND user_id = ? RETURNING …` and treats zero rows as the 404 signal. Strictly safer (no read-then-write TOCTOU window), one round-trip instead of two, and the observable behaviour is identical — another user's job is still a 404, pinned by a test that also proves the row is unchanged. `attachLedgerAndFit` follows the same shape.
+  2. **The route adds a requirement-id uniqueness/non-emptiness check that FND-03's `JdExtract` does not enforce.** The ids are the join key FIT-02's `Binding.requirementId`/`Gap.requirementId` point at and FND-07's coverage check counts; a duplicate would silently corrupt CROSS's output with no schema-level signal. A violation funnels into the one repair retry, exactly like a Zod failure.
+  3. **`db/migrate.test.ts`'s Tier-3 round-trip was also updated** (the plan named only the Tier-2 static assertion). Its previous test proved a `fit`-less insert is REJECTED — which migration 0003 makes false on purpose. It now proves both halves: a `jd`-only insert succeeds and reads back nulls, and an insert missing `jd` is still rejected.
+  4. **`recordUsage`'s lazy import is wrapped in try/catch** (LIB-01's equivalent call is not). The job row is already committed at that point, so a failure there must not turn a successful creation into a 500 the client would retry — a retry would create a duplicate job and spend a second READ call.
+  5. **The `@/lib/config/quota` lazy import sits inside the quota try/catch**, so an import-time failure (it statically imports `@/db/index`) fails closed as a 503 rather than escaping as an unhandled 500.
+
+  ### Confirmations required by upstream tickets
+
+  - **FND-06's `QUOTA_OP_TO_USAGE_OP` re-confirmed** (that table's comment obliges this ticket to re-verify it): this route charges quota bucket **`'fit'`** and records usage op **`'read'`**, exactly as the mapping assumes. Neither side was changed. `checkAndIncrementQuota(userId, 'fit')` is called exactly once, before any paid call, and a test asserts both the call count and the ordering against the Anthropic call.
+  - **Known gaps carried forward, not fixed here**: FND-06's check-only quota race (§4 R2, accepted by FND-06's own Feedback obligation #2); a paid-but-unusable READ records no `usage_events` row so the breaker under-counts it (§5 Q3, identical to LIB-01's gap — both routes should change together or not at all); `lib/db/queries/admin.ts`'s now-stale `fitToTailor` denominator (§5 Q2, `07-platform-launch`-owned); FIT-02's replay surface, since `attachLedgerAndFit` deliberately ships with no "already fitted" guard (§5 Q4).
+  - **Feedback obligation #3**: `lib/read/prompt.ts` is new hand-authored content. `pnpm test` never makes a real model call, so a green suite proves wiring, not model quality — the file ends with a human-run manual smoke recipe, and the `[fixture]` acceptance item runs canned replies derived from each of EVL-01's 10 JD fixtures through EVL-02's `assertQ1Schema`.
+
+  ### Test results
+
+  `pnpm test`: **57 files / 649 tests green** (baseline before this ticket: 54 / 576). `pnpm lint`: clean. `pnpm build` with `DATABASE_URL` unset: exit 0, with `/api/jobs` and `/api/jobs/[id]` in the route table.

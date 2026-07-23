@@ -84,10 +84,20 @@ describe('db/migrate — committed migration SQL (Tier 2)', () => {
     }
   });
 
-  it('declares jobs.jd / jobs.ledger / jobs.fit as NOT NULL (acceptance item 3)', () => {
+  // AMENDED by 04-fit/FIT-01 (docs/plans/FIT-01.md §0.1 resolution R-A).
+  //
+  // `sql` is the CONCATENATION of every committed migration, so the original
+  // assertions (/"ledger" jsonb NOT NULL/) would still match migration 0000's
+  // CREATE TABLE and stay GREEN while asserting something that is no longer true of
+  // the live schema. What matters is where the MIGRATION CHAIN ENDS: 0000 created
+  // all three NOT NULL, 0003 dropped the constraint on `ledger` and `fit` because
+  // FIT-01 creates a job row with `jd` only and FIT-02 fills the other two later.
+  // `jd` is still NOT NULL and nothing has ever relaxed it.
+  it('declares jobs.jd NOT NULL and ends with jobs.ledger / jobs.fit nullable (FIT-01 §0.1 R-A)', () => {
     expect(sql).toMatch(/"jd" jsonb NOT NULL/);
-    expect(sql).toMatch(/"ledger" jsonb NOT NULL/);
-    expect(sql).toMatch(/"fit" jsonb NOT NULL/);
+    expect(sql).not.toMatch(/ALTER TABLE "jobs" ALTER COLUMN "jd" DROP NOT NULL/);
+    expect(sql).toMatch(/ALTER TABLE "jobs" ALTER COLUMN "ledger" DROP NOT NULL/);
+    expect(sql).toMatch(/ALTER TABLE "jobs" ALTER COLUMN "fit" DROP NOT NULL/);
   });
 
   it('leaves briefs.intel nullable (jsonb with no NOT NULL)', () => {
@@ -274,7 +284,13 @@ describe('db/migrate — PGlite round-trip (Tier 3)', () => {
     30_000,
   );
 
-  it('rejects an insert that violates a NOT NULL jsonb column (jobs.fit)', async () => {
+  // AMENDED by 04-fit/FIT-01 (docs/plans/FIT-01.md §0.1 resolution R-A). This test
+  // previously proved that an insert WITHOUT `fit` is rejected. Migration 0003 makes
+  // that insert legal on purpose — it is exactly what FIT-01's POST /api/jobs does —
+  // so the test now pins BOTH halves of the new constraint set through the real
+  // migration chain: a `jd`-only insert SUCCEEDS and reads back nulls, and an insert
+  // missing `jd` is still rejected by the database.
+  it('accepts a jd-only job insert (FIT-01) and still rejects one missing jd', async () => {
     const client = new PGlite();
     const db = drizzle(client, { schema });
     await migrate(db, { migrationsFolder: './db/migrations' });
@@ -282,8 +298,23 @@ describe('db/migrate — PGlite round-trip (Tier 3)', () => {
     const userId = crypto.randomUUID();
     await db.insert(schema.users).values({ id: userId, email: 'b@example.com' });
 
-    // Bypass the compile-time type (fit is required) to prove the DB-level NOT NULL
-    // constraint actually rejects a missing fit at runtime.
+    // The FIT-01 shape: jd present, ledger/fit absent (FIT-02 fills them later).
+    const [row] = await db
+      .insert(schema.jobs)
+      .values({
+        userId,
+        company: 'Acme',
+        role: 'Engineer',
+        status: 'screening',
+        jdRaw: 'x',
+        jd: { requirements: [], atsKeywords: [], subtext: [] },
+      })
+      .returning();
+    expect(row.ledger).toBeNull();
+    expect(row.fit).toBeNull();
+
+    // `jd` is still NOT NULL. Bypass the compile-time type to prove the DB-level
+    // constraint (not just Drizzle's typing) rejects a missing jd at runtime.
     await expect(
       db.insert(schema.jobs).values({
         userId,
@@ -291,12 +322,10 @@ describe('db/migrate — PGlite round-trip (Tier 3)', () => {
         role: 'Engineer',
         status: 'screening',
         jdRaw: 'x',
-        jd: { requirements: [], atsKeywords: [], subtext: [] },
-        ledger: { bindings: [], gaps: [] },
-        // fit intentionally omitted
+        // jd intentionally omitted
       } as unknown as typeof schema.jobs.$inferInsert),
     ).rejects.toThrow();
 
     await client.close();
-  });
+  }, 30_000);
 });
