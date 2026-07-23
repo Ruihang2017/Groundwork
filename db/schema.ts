@@ -369,3 +369,36 @@ export const verificationTokens = pgTable(
   },
   (table) => [primaryKey({ columns: [table.identifier, table.token] })],
 );
+
+// --- invite_codes ---------------------------------------------------------------
+// PLT-04 / PRD §9 "上线初期以邀请码控制注册节奏". The 10th table; nothing above it
+// changes. `usedAt` follows this file's convention #1 (bigint epoch-ms), NOT a
+// native `timestamp` — the ticket's word "timestamp" is prose, and every non-Auth.js
+// timestamp column in this schema is bigint/ms.
+//
+// TWO LOAD-BEARING DECISIONS, both verified by probe (docs/plans/PLT-04.md §0):
+//
+// 1. `usedAt IS NULL` — NEVER `usedBy IS NULL` — is the authoritative "unused"
+//    predicate. `usedBy` is nulled by the FK when its owner deletes their account
+//    (PRD §5.6 hard delete), so a `usedBy`-based guard would silently RECYCLE a
+//    spent code. Every query in lib/db/queries/invite-codes.ts guards on usedAt.
+// 2. `onDelete: 'set null'` is REQUIRED, not stylistic. PLT-01's account-delete
+//    route ends with `DELETE FROM users` inside one transaction; drizzle's default
+//    referential action (NO ACTION) would make that statement fail for any user who
+//    had redeemed a code — i.e. it would break the PRD §5.6 hard-delete guarantee.
+//    'set null' also satisfies §5.6 for this table: after deletion no row here links
+//    to the person (a bare epoch-ms `usedAt` identifies nobody).
+//
+// `usedBy` is nullable for a second, independent reason: the invite gate runs in the
+// Auth.js `signIn` callback, which fires BEFORE the users row is created, so the
+// redeeming request has no real user id to write. See docs/plans/PLT-04.md §2.4.
+//
+// No index beyond the primary key: every query looks a row up by `code` (the PK).
+export const inviteCodes = pgTable('invite_codes', {
+  code: text('code').primaryKey(),
+  usedBy: text('used_by').references(() => users.id, { onDelete: 'set null' }),
+  usedAt: bigint('used_at', { mode: 'number' }),
+  createdAt: bigint('created_at', { mode: 'number' })
+    .notNull()
+    .$defaultFn(() => Date.now()),
+});
